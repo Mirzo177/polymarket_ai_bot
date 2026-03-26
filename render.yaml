@@ -1,0 +1,25 @@
+services:
+  - type: worker
+    name: quant-trader
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python quant_trader.py
+
+  - type: worker
+    name: professional-analyst
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python professional_analyst.py
+
+  - type: web
+    name: dashboard
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python data_api.py
+    envVars:
+      - key: POLY_BUILDER_KEY
+        value: "019d2b2f-b867-7daf-ac0b-92da916743fd"
+      - key: POLY_BUILDER_SECRET
+        value: "g8_tldos1eNeC1Ri6Itnaz49ibSBRCQKhYQCgK30qos="
+      - key: POLY_BUILDER_PASSPHRASE
+        value: "bd017fc2ea140a60e42763d2383935fa6dd33b0d972ba08f7bf96d0c5cc41059"

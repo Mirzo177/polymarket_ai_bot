@@ -1,0 +1,41 @@
+global:
+  polling_interval_sec: 60
+  log_level: INFO
+  max_markets_per_cycle: 10
+  base_currency: USD
+  time_zone: UTC
+  max_text_tokens: 8000
+
+risk:
+  max_notional_per_market: 100
+  max_total_exposure: 500
+  max_daily_loss_pct: 5.0
+  max_position_per_outcome: 50
+  stop_trading_on_drawdown: true
+  min_edge_threshold: 0.05
+  min_liquidity_usd: 1000
+
+strategies:
+  value_bet:
+    min_edge: 0.05
+    kelly_fraction: 0.25
+    max_bet_pct_portfolio: 0.05
+  trend_follow:
+    ma_short: 20
+    ma_long: 50
+    rsi_oversold: 30
+    rsi_overbought: 70
+  simple_arb:
+    min_price_deviation: 0.02
+    max_position_size: 25
+
+research:
+  max_articles: 5
+  max_news_sources: 3
+  max_text_tokens_to_send: 6000
+  news_timeout_sec: 30
+
+execution:
+  order_timeout_sec: 30
+  max_retries: 3
+  retry_delay_sec: 5

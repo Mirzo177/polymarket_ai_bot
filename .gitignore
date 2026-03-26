@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Data files
+*.json
+*.sqlite
+*.db
+!requirements.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (keep these local)
+.env
+.env.local
+*.txt
+*.log
+quant_state.json
+trader_state.json
+performance.json
+strategies.json
+*.json
+
