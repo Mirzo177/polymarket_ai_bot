@@ -1,3 +1,1 @@
-worker: python quant_trader.py
-analyst: python professional_analyst.py
-web: python dashboard_api.py
+web: python quant_trader_web.py
