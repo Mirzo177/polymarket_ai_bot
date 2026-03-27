@@ -344,23 +344,82 @@ class QuantEngine:
                 if market_id in historical_data:
                     trade['current_price'] = historical_data[market_id]['current']
             
+            # Research markets - analyze each one deeply
+            MAX_RESOLUTION_DAYS = 3
+            research_candidates = []
+            
+            for m in liquid[:30]:
+                try:
+                    # Calculate days until resolution
+                    days_until = None
+                    if m.get('endDate'):
+                        try:
+                            end_dt = datetime.fromisoformat(m['endDate'].replace('Z', '+00:00'))
+                            days_until = max(0, (end_dt - datetime.now(timezone.utc)).days)
+                        except:
+                            days_until = 999  # No end date = far future
+                    
+                    # Research score calculation
+                    research = {
+                        'market': m,
+                        'days_until': days_until,
+                        'volume_score': min(m['volume'] / 1000000, 10),  # Cap at 10
+                        'liquidity_score': min(m['liquidity'] / 10000, 10),
+                        'spread_score': max(0, 10 - m['spread']),  # Lower spread = higher score
+                        'volatility_score': abs(m.get('oneDayChange', 0)) * 10,
+                        'category_bonus': {'Sports': 2, 'Crypto': 3, 'Politics': 4, 'Business': 2, 'Tech': 3}.get(m['category'], 1),
+                    }
+                    
+                    # Overall research score (0-100)
+                    research['research_score'] = (
+                        research['volume_score'] * 2 +
+                        research['liquidity_score'] * 1.5 +
+                        research['spread_score'] * 1 +
+                        research['volatility_score'] * 0.5 +
+                        research['category_bonus']
+                    )
+                    
+                    research_candidates.append(research)
+                    
+                except:
+                    continue
+            
+            # Sort by research score
+            research_candidates.sort(key=lambda x: x['research_score'], reverse=True)
+            
+            # Filter: only markets resolving within MAX_RESOLUTION_DAYS OR no end date (will resolve eventually)
+            soon_resolving = [r for r in research_candidates if r['days_until'] is not None and r['days_until'] <= MAX_RESOLUTION_DAYS]
+            
+            # If no soon-resolving markets, take top 3 by research score anyway
+            if not soon_resolving:
+                soon_resolving = research_candidates[:3]
+            
             # Trading logic
             trading_state['cycle'] += 1
             new_trades = []
             
-            for m in liquid[:15]:
+            for research in soon_resolving[:5]:  # Take top 5 candidates
                 try:
+                    m = research['market']
                     price = m['price']
+                    days_until = research['days_until']
                     
                     if price < 0.01 or price > 0.99:
                         continue
                     
+                    # Deep analysis
                     prob_result = self.prob.estimate({'question': m['question'], 'price_yes': price})
                     edge = prob_result['probability'] - price
                     
-                    if abs(edge) > 0.01:
+                    # Only trade if edge > 3%
+                    if abs(edge) > 0.03:
                         odds = 1 / price if price > 0 else 1
                         kelly_result = self.kelly.calculate(prob_result['probability'], odds)
+                        
+                        # Higher Kelly for short-term trades
+                        if days_until is not None and days_until <= 3:
+                            kelly_result['kelly_fraction'] = min(kelly_result['kelly_fraction'] * 2, 0.1)
+                        
                         size = 1000 * kelly_result['kelly_fraction']
                         
                         if size > 2:
@@ -373,11 +432,11 @@ class QuantEngine:
                                 'price': round(price, 4),
                                 'entry_price': round(price, 4),
                                 'cost': round(size * price, 2),
-                                'question': m['question'][:60],
+                                'question': m['question'][:80],
                                 'market_id': m['id'],
                                 'edge': round(edge, 4),
                                 'volume': m['volume'],
-                                'strategy': 'FUNDAMENTAL',
+                                'strategy': 'DEEP RESEARCH',
                                 'status': 'PENDING',
                                 'result': None,
                                 'profit': 0,
@@ -391,18 +450,18 @@ class QuantEngine:
                                 'method': prob_result['method'],
                                 'endDate': m.get('endDate'),
                                 'current_price': price,
-                                'days_to_resolve': None
+                                'days_to_resolve': days_until,
+                                'research_score': round(research['research_score'], 1),
+                                'research': {
+                                    'volume_score': round(research['volume_score'], 1),
+                                    'liquidity_score': round(research['liquidity_score'], 1),
+                                    'spread_score': round(research['spread_score'], 1),
+                                    'volatility': round(m.get('oneDayChange', 0) * 100, 1)
+                                }
                             }
                             
-                            if trade['endDate']:
-                                try:
-                                    end_dt = datetime.fromisoformat(trade['endDate'].replace('Z', '+00:00'))
-                                    trade['days_to_resolve'] = max(0, (end_dt - datetime.now(timezone.utc)).days)
-                                except:
-                                    pass
-                            
                             new_trades.append(trade)
-                            trading_state['strategy_stats']['FUNDAMENTAL'] += 1
+                            trading_state['strategy_stats']['DEEP RESEARCH'] += 1
                 except:
                     continue
             
@@ -968,10 +1027,10 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
                         '<div class="trade-question">' + x.question + '</div>' +
                         '<div class="trade-row"><span class="trade-action ' + (isBuy ? 'buy' : 'sell') + '">' + x.action + '</span><span class="trade-meta">$' + x.size.toFixed(2) + ' @ ' + (x.price*100).toFixed(1) + '%</span></div>' +
                         '<div class="trade-details">' +
+                        '<div class="trade-stat"><div class="trade-stat-val">' + (x.research_score || x.edge*100).toFixed(0) + '</div><div class="trade-stat-label">SCORE</div></div>' +
                         '<div class="trade-stat"><div class="trade-stat-val">' + (x.edge*100).toFixed(1) + '%</div><div class="trade-stat-label">EDGE</div></div>' +
-                        '<div class="trade-stat"><div class="trade-stat-val">' + (x.prob_estimate*100).toFixed(0) + '%</div><div class="trade-stat-label">AI</div></div>' +
                         '<div class="trade-stat"><div class="trade-stat-val">' + ((x.current_price || x.price)*100).toFixed(1) + '%</div><div class="trade-stat-label">NOW</div></div>' +
-                        '<div class="trade-stat"><div class="trade-stat-val">' + days + '</div><div class="trade-stat-label">RESOLVE</div></div>' +
+                        '<div class="trade-stat"><div class="trade-stat-val">' + days + '</div><div class="trade-stat-label">DAYS</div></div>' +
                         '</div>' +
                         '<div class="trade-pnl ' + pnlClass + '">P&L: ' + (pnl.pnl >= 0 ? '+' : '') + '$' + pnl.pnl.toFixed(2) + ' (' + (pnl.pnlPercent >= 0 ? '+' : '') + pnl.pnlPercent.toFixed(1) + '%)</div>' +
                         '</div>';
