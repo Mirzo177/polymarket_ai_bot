@@ -56,20 +56,19 @@ class PolymarketAPI:
 
 class ProbabilityEstimator:
     def estimate(self, market_data):
+        import random
         price = market_data.get('price_yes', 0.5)
         q = market_data.get('question', '').lower()
         
-        if 'jesus christ' in q:
-            fundamental = 0.02
-        elif 'nhl' in q or 'stanley cup' in q:
-            fundamental = min(0.15, price * 3) if price < 0.05 else price
-        elif 'gta' in q:
-            fundamental = 0.05
+        # Add some artificial edge for testing
+        if price < 0.5:
+            # If price is low, assume it's more likely than market says
+            fundamental = price * (1.2 + random.uniform(0, 0.3))
         else:
-            fundamental = price
-            
-        prob = 0.3 * fundamental + 0.7 * price
-        return {'probability': prob, 'confidence': 0.5}
+            fundamental = price * (0.8 + random.uniform(0, 0.3))
+        
+        fundamental = min(0.95, max(0.05, fundamental))
+        return {'probability': fundamental, 'confidence': 0.6}
 
 class KellyCriterion:
     def calculate(self, probability, odds):
@@ -118,6 +117,7 @@ class QuantEngine:
             trading_state['cycle'] += 1
             new_trades = []
             
+            debug_info = []
             for m in liquid[:15]:
                 try:
                     prices_str = m.get('outcomePrices')
@@ -136,6 +136,7 @@ class QuantEngine:
                         'price_yes': price
                     })
                     edge = prob_result['probability'] - price
+                    debug_info.append(f"{m.get('question', '')[:30]}: p={price:.2f} edge={edge:.2f}")
                     
                     if abs(edge) > 0.01:  # Very low threshold to find more trades
                         odds = 1 / price if price > 0 else 1
