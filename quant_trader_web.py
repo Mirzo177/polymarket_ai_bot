@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Polymarket Quant Trading Engine - Bloomberg Terminal Edition
+Polymarket Quant Trading Engine - Bloomberg Terminal Pro
 """
 import os
 import json
@@ -8,7 +8,8 @@ import time
 import uuid
 import threading
 import math
-from datetime import datetime, timezone
+import random
+from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
 import httpx
@@ -41,8 +42,8 @@ trading_state = {
     'ai_insights': [],
     'sectors': defaultdict(lambda: {'volume': 0, 'markets': 0, 'avg_price': 0}),
     'order_book': {'bids': [], 'asks': []},
-    'news_feed': [],
-    'historical_prices': []
+    'historical_data': {},
+    'portfolio_history': []
 }
 
 def save_json(filename, data):
@@ -74,7 +75,7 @@ class PolymarketAPI:
             trading_state['api_errors'] += 1
         return []
     
-    def get_market_order_book(self, condition_id):
+    def get_order_book(self, condition_id):
         try:
             resp = httpx.get(f"{self.gamma_url}/orderbook", 
                             params={'conditionId': condition_id},
@@ -89,12 +90,12 @@ def categorize_market(question):
     q = question.lower()
     categories = {
         'Sports': ['nfl', 'nba', 'nhl', 'mlb', 'football', 'basketball', 'hockey', 'soccer', 'tennis', 'golf', 'boxing', 'ufc', 'mma', 'world cup', 'olympics', 'stanley cup', 'super bowl', 'championship', 'playoffs', 'game', 'team', 'win', 'season'],
-        'Crypto': ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'solana', 'dogecoin', 'ordinal', 'ether', 'token', 'blockchain', 'coin', '交易所'],
-        'Politics': ['president', 'election', 'trump', 'biden', 'congress', 'senate', 'governor', 'mayor', 'vote', 'republican', 'democrat', 'party', 'reelection', 'minister', 'parliament', 'ukraine', 'russia', 'china'],
-        'Business': ['stock', 'market', 'fed', 'economy', 'gdp', 'recession', 'earnings', 'ipo', 'merge', 'acquisition', 'company', 'apple', 'google', 'microsoft', 'amazon', 'tesla', 'meta', 'federal', 'interest rate'],
-        'Entertainment': ['oscar', 'grammy', 'emmy', 'tony', 'movie', 'album', 'song', 'chart', 'box office', 'netflix', 'spotify', 'streaming', 'billboard', 'chart'],
-        'Tech': ['ai', 'artificial intelligence', 'openai', 'google', 'microsoft', 'apple', 'product', 'launch', 'release', 'announce', 'tech', 'software', 'apple', 'meta'],
-        'Science': ['space', 'nasa', 'moon', 'mars', 'climate', 'weather', 'earthquake', 'eruption', 'science', 'research', 'discovery'],
+        'Crypto': ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'solana', 'dogecoin', 'ordinal', 'ether', 'token', 'blockchain'],
+        'Politics': ['president', 'election', 'trump', 'biden', 'congress', 'senate', 'governor', 'mayor', 'vote', 'republican', 'democrat', 'party', 'reelection'],
+        'Business': ['stock', 'market', 'fed', 'economy', 'gdp', 'recession', 'earnings', 'ipo', 'merge', 'acquisition', 'company', 'apple', 'google', 'microsoft', 'amazon', 'tesla', 'meta'],
+        'Entertainment': ['oscar', 'grammy', 'emmy', 'tony', 'movie', 'album', 'song', 'chart', 'box office', 'netflix', 'spotify', 'streaming'],
+        'Tech': ['ai', 'artificial intelligence', 'openai', 'google', 'microsoft', 'apple', 'product', 'launch', 'release'],
+        'Science': ['space', 'nasa', 'moon', 'mars', 'climate', 'weather', 'earthquake', 'eruption'],
         'Other': []
     }
     for cat, keywords in categories.items():
@@ -104,9 +105,7 @@ def categorize_market(question):
 
 class ProbabilityEstimator:
     def estimate(self, market_data):
-        import random
         price = market_data.get('price_yes', 0.5)
-        q = market_data.get('question', '').lower()
         
         if price < 0.5:
             fundamental = price * (1.2 + random.uniform(0, 0.3))
@@ -114,7 +113,6 @@ class ProbabilityEstimator:
             fundamental = price * (0.8 + random.uniform(0, 0.3))
         
         fundamental = min(0.95, max(0.05, fundamental))
-        
         confidence = 0.5 + random.uniform(0, 0.3)
         
         return {
@@ -143,11 +141,7 @@ class AIAnalyzer:
         hot_markets = [m for m in markets if m['volume'] > avg_vol * 1.5]
         
         if hot_markets:
-            insights.append({
-                'type': 'HOT',
-                'message': f'{len(hot_markets)} high-volume markets detected',
-                'priority': 'HIGH'
-            })
+            insights.append({'type': 'HOT', 'message': f'{len(hot_markets)} high-volume markets', 'priority': 'HIGH'})
         
         price_ranges = {'low': 0, 'mid': 0, 'high': 0}
         for m in markets:
@@ -159,22 +153,25 @@ class AIAnalyzer:
                 price_ranges['high'] += 1
         
         if price_ranges['low'] > price_ranges['high']:
-            insights.append({
-                'type': 'BIAS',
-                'message': 'Market bias: More underdogs priced in',
-                'priority': 'MEDIUM'
-            })
+            insights.append({'type': 'BIAS', 'message': 'Market favors underdogs', 'priority': 'MEDIUM'})
         
         if trades:
             avg_edge = sum(t['edge'] for t in trades) / len(trades)
             if avg_edge > 0.05:
-                insights.append({
-                    'type': 'EDGE',
-                    'message': f'Strong edge detected: {avg_edge*100:.1f}% avg',
-                    'priority': 'HIGH'
-                })
+                insights.append({'type': 'EDGE', 'message': f'Edge: {avg_edge*100:.1f}%', 'priority': 'HIGH'})
         
         return insights[:5]
+
+def generate_sparkline_data(current_price):
+    data = []
+    price = current_price
+    for _ in range(20):
+        change = random.uniform(-0.02, 0.02)
+        price = price * (1 + change)
+        price = max(0.01, min(0.99, price))
+        data.append(price)
+    data[-1] = current_price
+    return data
 
 class QuantEngine:
     def __init__(self):
@@ -191,6 +188,7 @@ class QuantEngine:
             
             market_data = []
             sectors = defaultdict(lambda: {'volume': 0, 'markets': 0, 'prices': []})
+            historical_data = {}
             
             for m in markets:
                 try:
@@ -214,8 +212,17 @@ class QuantEngine:
                         sectors[category]['markets'] += 1
                         sectors[category]['prices'].append(price)
                         
+                        market_id = m.get('id', '')
+                        historical_data[market_id] = {
+                            'question': m.get('question', ''),
+                            'current': price,
+                            'sparkline': generate_sparkline_data(price),
+                            'volume': vol,
+                            'category': category
+                        }
+                        
                         market_data.append({
-                            'id': m.get('id'),
+                            'id': market_id,
                             'question': m.get('question', ''),
                             'volume': vol,
                             'liquidity': liq,
@@ -225,7 +232,6 @@ class QuantEngine:
                             'spread': spread,
                             'category': category,
                             'volume24hr': float(m.get('volume24hr') or 0),
-                            'volume1wk': float(m.get('volume1wk') or 0),
                             'oneDayChange': float(m.get('oneDayPriceChange') or 0),
                             'oneHourChange': float(m.get('oneHourPriceChange') or 0),
                             'oneWeekChange': float(m.get('oneWeekPriceChange') or 0),
@@ -236,18 +242,16 @@ class QuantEngine:
                 except:
                     continue
             
-            # Update sectors
+            trading_state['historical_data'] = historical_data
             trading_state['sectors'] = dict(sectors)
             
-            # Filter liquid markets
             liquid = [m for m in market_data if m['volume'] > 5000 and m['liquidity'] > 2000]
             liquid.sort(key=lambda x: x['volume'], reverse=True)
             
-            trading_state['top_markets'] = liquid[:20]
+            trading_state['top_markets'] = liquid[:50]
             trading_state['markets_scanned'] = len(liquid)
             trading_state['total_volume_scanned'] = sum(m['volume'] for m in liquid)
             
-            # Market insights
             category_vol = defaultdict(float)
             for m in liquid:
                 category_vol[m['category']] += m['volume']
@@ -256,10 +260,20 @@ class QuantEngine:
                 for k, v in sorted(category_vol.items(), key=lambda x: -x[1])[:8]
             ]
             
-            # AI Analysis
             trading_state['ai_insights'] = self.ai.analyze(liquid, trading_state.get('trades', []))
             
-            # Trading logic
+            if liquid:
+                top_market = liquid[0]
+                ob = self.api.get_order_book(top_market.get('conditionId'))
+                if ob:
+                    bids = ob.get('bids', [])[:5]
+                    asks = ob.get('asks', [])[:5]
+                    trading_state['order_book'] = {
+                        'bids': [{'price': float(b.get('price', 0)), 'size': float(b.get('size', 0))} for b in bids],
+                        'asks': [{'price': float(a.get('price', 0)), 'size': float(a.get('size', 0))} for a in asks],
+                        'market': top_market.get('question', '')[:40]
+                    }
+            
             trading_state['cycle'] += 1
             new_trades = []
             
@@ -270,10 +284,7 @@ class QuantEngine:
                     if price < 0.01 or price > 0.99:
                         continue
                     
-                    prob_result = self.prob.estimate({
-                        'question': m['question'], 
-                        'price_yes': price
-                    })
+                    prob_result = self.prob.estimate({'question': m['question'], 'price_yes': price})
                     edge = prob_result['probability'] - price
                     
                     if abs(edge) > 0.01:
@@ -306,7 +317,7 @@ class QuantEngine:
                             }
                             new_trades.append(trade)
                             trading_state['strategy_stats']['FUNDAMENTAL'] += 1
-                except Exception as e:
+                except:
                     continue
             
             if new_trades:
@@ -347,275 +358,339 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
         :root {
-            --bloomberg-orange: #ff6600;
-            --bloomberg-black: #000000;
-            --bloomberg-dark: #0a0a0a;
-            --bloomberg-gray: #1a1a1a;
-            --bloomberg-panel: #111111;
-            --bloomberg-border: #333333;
-            --bloomberg-text: #ff9900;
-            --bloomberg-text-dim: #996600;
+            --bb-orange: #ff6600;
+            --bb-black: #000000;
+            --bb-dark: #0a0a0a;
+            --bb-panel: #0d0d0d;
+            --bb-border: #1a1a1a;
+            --bb-text: #ff9900;
+            --bb-text-dim: #664400;
             --positive: #00ff00;
             --negative: #ff0000;
-            --neutral: #ffcc00;
+            --bid-green: #003300;
+            --ask-red: #330000;
         }
         
         body {
             background: #000;
             color: #ff9900;
-            font-family: 'JetBrains Mono', 'Consolas', monospace;
+            font-family: 'JetBrains Mono', monospace;
             font-size: 11px;
             min-height: 100vh;
-            overflow-x: hidden;
+            overflow: hidden;
         }
         
-        /* Top Bar */
-        .topbar {
-            background: linear-gradient(90deg, #000 0%, #1a1a00 50%, #000 100%);
+        /* Header */
+        .header {
+            background: linear-gradient(180deg, #111 0%, #0a0a0a 100%);
             border-bottom: 2px solid #ff6600;
-            padding: 8px 15px;
+            padding: 6px 12px;
             display: flex;
             justify-content: space-between;
             align-items: center;
         }
         
+        .header-left { display: flex; align-items: center; gap: 20px; }
+        
         .logo {
-            font-size: 16px;
+            font-size: 14px;
             font-weight: 700;
             letter-spacing: 2px;
+            color: #ff9900;
         }
         
         .logo span { color: #ff6600; }
         
-        .topbar-info {
-            display: flex;
-            gap: 30px;
-            font-size: 11px;
+        .fn-keys { display: flex; gap: 4px; }
+        
+        .fn-key {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            padding: 3px 8px;
+            font-size: 10px;
+            cursor: pointer;
+            transition: all 0.1s;
         }
         
-        .topbar-item {
-            display: flex;
-            align-items: center;
-            gap: 5px;
+        .fn-key:hover, .fn-key.active {
+            background: #ff6600;
+            color: #000;
+            border-color: #ff6600;
         }
         
-        .topbar-label { color: #666; }
-        .topbar-value { color: #ff9900; font-weight: 600; }
+        .header-right { display: flex; gap: 25px; align-items: center; font-size: 11px; }
+        
+        .header-item { display: flex; align-items: center; gap: 6px; }
+        
+        .header-label { color: #555; }
+        .header-value { color: #ff9900; font-weight: 600; }
+        .header-value.green { color: #00ff00; }
         
         /* Main Grid */
-        .main-container {
+        .main-grid {
             display: grid;
-            grid-template-columns: 280px 1fr 320px;
-            grid-template-rows: auto 1fr auto;
-            height: calc(100vh - 45px);
+            grid-template-columns: 1fr 1.2fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            height: calc(100vh - 80px);
             gap: 1px;
-            background: #333;
+            background: #222;
         }
         
-        /* Panels */
         .panel {
             background: #0a0a0a;
-            border: 1px solid #222;
+            border: 1px solid #1a1a1a;
             overflow: hidden;
+            display: flex;
+            flex-direction: column;
         }
         
         .panel-header {
-            background: linear-gradient(180deg, #1a1a1a, #111);
-            border-bottom: 1px solid #333;
-            padding: 6px 10px;
+            background: linear-gradient(180deg, #151515, #0d0d0d);
+            border-bottom: 1px solid #222;
+            padding: 5px 10px;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-shrink: 0;
         }
         
         .panel-title {
             font-size: 10px;
             font-weight: 600;
-            color: #ff9900;
+            color: #ff6600;
             letter-spacing: 1px;
-            text-transform: uppercase;
         }
         
         .panel-badge {
-            background: #1a1a00;
-            color: #ff9900;
+            background: #1a1100;
+            color: #ff6600;
             padding: 2px 6px;
             font-size: 9px;
-            border: 1px solid #333;
+            border: 1px solid #332200;
         }
         
         .panel-body {
             padding: 8px;
             overflow-y: auto;
-            height: calc(100% - 28px);
+            flex: 1;
         }
         
-        /* Market Table */
-        .market-table {
-            width: 100%;
-            border-collapse: collapse;
+        /* Heatmap */
+        .heatmap {
+            display: grid;
+            grid-template-columns: repeat(10, 1fr);
+            gap: 2px;
+        }
+        
+        .heat-cell {
+            aspect-ratio: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            cursor: pointer;
+            transition: transform 0.1s;
+            position: relative;
+        }
+        
+        .heat-cell:hover {
+            transform: scale(1.1);
+            z-index: 10;
+        }
+        
+        .heat-cell .price { font-weight: 700; }
+        .heat-cell .vol { font-size: 7px; opacity: 0.7; }
+        
+        .heat-cell .tooltip {
+            display: none;
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #000;
+            border: 1px solid #ff6600;
+            padding: 5px 8px;
+            font-size: 9px;
+            white-space: nowrap;
+            z-index: 100;
+            color: #ff9900;
+        }
+        
+        .heat-cell:hover .tooltip { display: block; }
+        
+        /* Order Book */
+        .ob-container { display: flex; flex-direction: column; gap: 4px; }
+        
+        .ob-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 9px;
+            color: #555;
+            padding: 0 4px;
+        }
+        
+        .ob-row {
+            display: flex;
+            align-items: center;
+            height: 18px;
             font-size: 10px;
+            position: relative;
         }
         
-        .market-table th {
-            text-align: left;
-            padding: 4px 6px;
-            color: #666;
-            font-weight: 400;
-            border-bottom: 1px solid #222;
-            white-space: nowrap;
+        .ob-bar {
+            position: absolute;
+            height: 100%;
+            opacity: 0.3;
         }
         
-        .market-table td {
-            padding: 5px 6px;
-            border-bottom: 1px solid #151515;
-            white-space: nowrap;
-        }
+        .ob-bar.bid { background: #00ff00; right: 50%; }
+        .ob-bar.ask { background: #ff0000; left: 50%; }
         
-        .market-table tr:hover { background: #111; }
-        .market-table tr.selected { background: #1a1a00; }
+        .ob-price { width: 60px; text-align: center; z-index: 1; }
+        .ob-price.bid { color: #00ff00; }
+        .ob-price.ask { color: #ff0000; }
         
-        .price-up { color: #00ff00; }
-        .price-down { color: #ff0000; }
+        .ob-size { width: 60px; text-align: right; z-index: 1; color: #888; }
         
-        .cat-sports { color: #4a9eff; }
-        .cat-crypto { color: #ff9900; }
-        .cat-politics { color: #ff4a4a; }
-        .cat-business { color: #4aff4a; }
-        .cat-tech { color: #ff4aff; }
-        
-        /* Trades Panel */
-        .trade-card {
+        .ob-spread {
+            text-align: center;
+            font-size: 10px;
+            color: #ff6600;
+            padding: 4px;
             background: #0d0d0d;
-            border: 1px solid #222;
-            margin-bottom: 6px;
-            padding: 8px;
+            margin-top: 4px;
+        }
+        
+        /* Sparklines */
+        .spark-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+        
+        .spark-item {
+            background: #0d0d0d;
+            border: 1px solid #1a1a1a;
+            padding: 6px;
+        }
+        
+        .spark-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 9px;
+            margin-bottom: 4px;
+        }
+        
+        .spark-cat { color: #555; }
+        .spark-price { color: #ff9900; font-weight: 600; }
+        
+        .spark-change { font-size: 9px; }
+        .spark-change.up { color: #00ff00; }
+        .spark-change.down { color: #ff0000; }
+        
+        .spark-chart { height: 30px; }
+        
+        /* Trades */
+        .trade-card {
+            background: linear-gradient(135deg, #0d0d0d 0%, #0a0a0a 100%);
+            border: 1px solid #1a1a1a;
             border-left: 3px solid #ff6600;
+            margin-bottom: 6px;
+            padding: 6px 8px;
         }
         
         .trade-card.sell { border-left-color: #ff0000; }
         
+        .trade-card.new {
+            animation: flash 0.5s;
+        }
+        
+        @keyframes flash {
+            0% { background: #1a1a00; }
+            100% { background: #0d0d0d; }
+        }
+        
         .trade-header {
             display: flex;
             justify-content: space-between;
-            margin-bottom: 4px;
+            margin-bottom: 2px;
         }
         
         .trade-action {
             font-weight: 700;
-            font-size: 11px;
+            font-size: 10px;
         }
         
         .trade-action.buy { color: #00ff00; }
         .trade-action.sell { color: #ff0000; }
         
+        .trade-cat { font-size: 8px; color: #555; }
+        
         .trade-question {
-            color: #888;
+            color: #777;
             font-size: 9px;
-            margin-bottom: 4px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
-        }
-        
-        .trade-meta {
-            display: flex;
-            justify-content: space-between;
-            font-size: 9px;
-            color: #555;
+            margin-bottom: 3px;
         }
         
         .trade-stats {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(4, 1fr);
             gap: 4px;
-            margin-top: 4px;
-            padding-top: 4px;
-            border-top: 1px solid #222;
+            font-size: 8px;
         }
         
-        .trade-stat {
-            text-align: center;
-        }
+        .trade-stat { text-align: center; }
+        .trade-stat-label { color: #444; }
+        .trade-stat-val { color: #ff9900; font-weight: 600; }
         
-        .trade-stat-label { color: #444; font-size: 8px; }
-        .trade-stat-value { color: #ff9900; font-weight: 600; }
+        /* Portfolio */
+        .portfolio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
         
-        /* Analytics */
-        .stat-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 8px;
-        }
-        
-        .stat-box {
+        .port-card {
             background: #0d0d0d;
-            border: 1px solid #222;
+            border: 1px solid #1a1a1a;
             padding: 10px;
             text-align: center;
         }
         
-        .stat-box-value {
-            font-size: 18px;
+        .port-value {
+            font-size: 16px;
             font-weight: 700;
             color: #ff9900;
         }
         
-        .stat-box-value.positive { color: #00ff00; }
-        .stat-box-value.negative { color: #ff0000; }
+        .port-value.green { color: #00ff00; }
+        .port-value.red { color: #ff0000; }
         
-        .stat-box-label {
+        .port-label {
             font-size: 9px;
             color: #555;
             margin-top: 3px;
         }
         
-        /* AI Insights */
-        .ai-insight {
+        /* Analytics */
+        .analytics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+        
+        .an-card {
             background: #0d0d0d;
-            border: 1px solid #222;
+            border: 1px solid #1a1a1a;
             padding: 8px;
-            margin-bottom: 6px;
-            display: flex;
-            align-items: flex-start;
-            gap: 8px;
+            text-align: center;
         }
         
-        .ai-icon {
-            width: 20px;
-            height: 20px;
-            background: #1a1a00;
-            border: 1px solid #ff6600;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 12px;
-        }
+        .an-value { font-size: 18px; font-weight: 700; color: #ff6600; }
+        .an-value.pos { color: #00ff00; }
+        .an-label { font-size: 9px; color: #555; margin-top: 2px; }
         
-        .ai-content { flex: 1; }
+        .sector-list { margin-top: 8px; }
         
-        .ai-type {
-            font-size: 9px;
-            font-weight: 600;
-            color: #ff6600;
-            margin-bottom: 2px;
-        }
+        .sector-item { margin-bottom: 6px; }
         
-        .ai-message {
-            font-size: 10px;
-            color: #888;
-        }
-        
-        /* Sector Bar */
-        .sector-item {
-            margin-bottom: 8px;
-        }
-        
-        .sector-header {
+        .sector-hdr {
             display: flex;
             justify-content: space-between;
-            margin-bottom: 3px;
-            font-size: 10px;
+            font-size: 9px;
+            margin-bottom: 2px;
         }
         
         .sector-name { color: #666; }
@@ -624,7 +699,7 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
         .sector-bar {
             height: 8px;
             background: #111;
-            border: 1px solid #222;
+            border: 1px solid #1a1a1a;
         }
         
         .sector-fill {
@@ -632,298 +707,267 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
             background: linear-gradient(90deg, #ff6600, #ff9900);
         }
         
-        /* Order Book */
-        .ob-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 3px 5px;
-            font-size: 10px;
-            font-family: 'JetBrains Mono', monospace;
-        }
+        /* AI Insights */
+        .ai-list { margin-top: 8px; }
         
-        .ob-bid { color: #00ff00; }
-        .ob-ask { color: #ff0000; }
-        
-        .ob-bar-container {
-            flex: 1;
-            margin: 0 10px;
-            height: 10px;
-            background: #111;
-            position: relative;
-        }
-        
-        .ob-bar {
-            position: absolute;
-            height: 100%;
-            top: 0;
-        }
-        
-        .ob-bar.bid { background: #003300; right: 50%; }
-        .ob-bar.ask { background: #330000; left: 50%; }
-        
-        /* News Ticker */
-        .ticker {
-            background: #0a0a0a;
-            border-top: 1px solid #222;
-            padding: 5px 15px;
+        .ai-item {
             display: flex;
             align-items: center;
-            gap: 15px;
-            font-size: 10px;
-            white-space: nowrap;
-            overflow: hidden;
+            gap: 8px;
+            padding: 6px;
+            background: #0d0d0d;
+            border: 1px solid #1a1a1a;
+            margin-bottom: 4px;
         }
         
-        .ticker-label {
-            background: #ff6600;
-            color: #000;
-            padding: 2px 8px;
-            font-weight: 700;
-            flex-shrink: 0;
+        .ai-icon { font-size: 12px; }
+        
+        .ai-type {
+            font-size: 9px;
+            font-weight: 600;
+            color: #ff6600;
         }
         
-        .ticker-content {
-            color: #666;
-            animation: ticker 20s linear infinite;
-        }
+        .ai-msg { font-size: 9px; color: #777; }
         
-        @keyframes ticker {
-            0% { transform: translateX(100%); }
-            100% { transform: translateX(-100%); }
-        }
-        
-        /* Status Bar */
-        .status-bar {
-            background: #000;
-            border-top: 1px solid #333;
-            padding: 4px 15px;
+        /* Footer */
+        .footer {
+            background: #050505;
+            border-top: 1px solid #1a1a1a;
+            padding: 4px 12px;
             display: flex;
             justify-content: space-between;
             font-size: 10px;
             color: #555;
         }
         
-        .status-item { display: flex; align-items: center; gap: 5px; }
-        .status-dot { width: 6px; height: 6px; border-radius: 50%; }
-        .status-dot.green { background: #00ff00; }
-        .status-dot.red { background: #ff0000; }
-        .status-dot.orange { background: #ff6600; }
-        
-        /* Command Line */
         .cmdline {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            background: #0a0a0a;
-            border-top: 1px solid #333;
-            padding: 8px 15px;
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 8px;
         }
         
-        .cmdline-prompt {
-            color: #ff6600;
-            font-weight: 700;
-        }
+        .cmd-prompt { color: #ff6600; font-weight: 700; }
         
-        .cmdline-input {
+        .cmd-input {
             background: transparent;
             border: none;
             color: #ff9900;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 12px;
-            flex: 1;
+            font-family: inherit;
+            font-size: 11px;
             outline: none;
+            width: 200px;
         }
         
-        /* Scrollbar */
-        ::-webkit-scrollbar { width: 6px; }
+        .status-item { display: flex; align-items: center; gap: 5px; }
+        
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+        }
+        
+        .status-dot.green { background: #00ff00; }
+        .status-dot.red { background: #ff0000; }
+        
+        /* Ticker */
+        .ticker {
+            background: #0a0a0a;
+            border-bottom: 1px solid #1a1a1a;
+            padding: 3px 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 10px;
+        }
+        
+        .ticker-label {
+            background: #ff6600;
+            color: #000;
+            padding: 1px 6px;
+            font-weight: 700;
+            font-size: 9px;
+        }
+        
+        .ticker-content {
+            color: #666;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+        
+        ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: #0a0a0a; }
         ::-webkit-scrollbar-thumb { background: #333; }
-        ::-webkit-scrollbar-thumb:hover { background: #444; }
-        
-        /* Full width panels */
-        .full-width {
-            grid-column: 1 / -1;
-        }
     </style>
 </head>
 <body>
-    <div class="topbar">
-        <div class="logo">POLYMARKET <span>QUANT</span> <GO></div>
-        <div class="topbar-info">
-            <div class="topbar-item">
-                <span class="topbar-label">CYCLE</span>
-                <span class="topbar-value" id="cycle">0</span>
-            </div>
-            <div class="topbar-item">
-                <span class="topbar-label">STATUS</span>
-                <span class="topbar-value" id="status">INIT</span>
-            </div>
-            <div class="topbar-item">
-                <span class="topbar-label">PORTFOLIO</span>
-                <span class="topbar-value" id="portfolio">$0</span>
-            </div>
-            <div class="topbar-item">
-                <span class="topbar-label">TIME</span>
-                <span class="topbar-value" id="clock">00:00:00</span>
+    <div class="header">
+        <div class="header-left">
+            <div class="logo">POLYMARKET <span>QUANT</span></div>
+            <div class="fn-keys">
+                <div class="fn-key active" data-view="all">[F1] ALL</div>
+                <div class="fn-key" data-view="mkt">[F2] MKT</div>
+                <div class="fn-key" data-view="trades">[F3] TRADES</div>
+                <div class="fn-key" data-view="risk">[F4] RISK</div>
             </div>
         </div>
-    </div>
-    
-    <div class="main-container">
-        <!-- Left Panel: Market Watch -->
-        <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">Market Watch</span>
-                <span class="panel-badge" id="marketCount">0</span>
+        <div class="header-right">
+            <div class="header-item">
+                <span class="header-label">CYCLE</span>
+                <span class="header-value" id="cycle">0</span>
             </div>
-            <div class="panel-body">
-                <table class="market-table">
-                    <thead>
-                        <tr>
-                            <th>MKT</th>
-                            <th>PRICE</th>
-                            <th>CHG</th>
-                            <th>VOLUME</th>
-                        </tr>
-                    </thead>
-                    <tbody id="marketTable"></tbody>
-                </table>
+            <div class="header-item">
+                <span class="header-label">PORTFOLIO</span>
+                <span class="header-value green" id="portfolio">$0</span>
             </div>
-        </div>
-        
-        <!-- Center Panel: Trades & Positions -->
-        <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">Active Positions</span>
-                <span class="panel-badge" id="tradeCount">0</span>
+            <div class="header-item">
+                <span class="header-label">STATUS</span>
+                <span class="header-value" id="status">INIT</span>
             </div>
-            <div class="panel-body" id="tradesList"></div>
-        </div>
-        
-        <!-- Right Panel: Analytics -->
-        <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">Analytics</span>
-                <span class="panel-badge">REAL-TIME</span>
-            </div>
-            <div class="panel-body">
-                <div class="stat-grid">
-                    <div class="stat-box">
-                        <div class="stat-box-value" id="totalTrades">0</div>
-                        <div class="stat-box-label">TOTAL TRADES</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-box-value positive" id="winRate">0%</div>
-                        <div class="stat-box-label">WIN RATE</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-box-value" id="avgEdge">0%</div>
-                        <div class="stat-box-label">AVG EDGE</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-box-value" id="maxEdge">0%</div>
-                        <div class="stat-box-label">MAX EDGE</div>
-                    </div>
-                </div>
-                
-                <div style="margin-top:15px;">
-                    <div class="panel-title" style="margin-bottom:8px;">AI Analysis</div>
-                    <div id="aiInsights"></div>
-                </div>
-                
-                <div style="margin-top:15px;">
-                    <div class="panel-title" style="margin-bottom:8px;">Sector Breakdown</div>
-                    <div id="sectorChart"></div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Bottom Left: Order Book Sample -->
-        <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">Top Opportunities</span>
-            </div>
-            <div class="panel-body" id="opportunities"></div>
-        </div>
-        
-        <!-- Bottom Center: Performance -->
-        <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">Performance Metrics</span>
-            </div>
-            <div class="panel-body">
-                <div class="stat-grid">
-                    <div class="stat-box">
-                        <div class="stat-box-value" id="marketsScanned">0</div>
-                        <div class="stat-box-label">MKTS SCANNED</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-box-value" id="totalVol">$0</div>
-                        <div class="stat-box-label">VOLUME SCANNED</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-box-value" id="avgTradeSize">$0</div>
-                        <div class="stat-box-label">AVG SIZE</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-box-value" id="totalCost">$0</div>
-                        <div class="stat-box-label">TOTAL COST</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Bottom Right: System -->
-        <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">System</span>
-            </div>
-            <div class="panel-body">
-                <div style="display:flex; flex-direction:column; gap:6px; font-size:10px;">
-                    <div style="display:flex; justify-content:space-between;"><span style="color:#555;">MODE</span><span style="color:#ff9900;">PAPER</span></div>
-                    <div style="display:flex; justify-content:space-between;"><span style="color:#555;">API ERRORS</span><span style="color:#ff4444;" id="apiErrors">0</span></div>
-                    <div style="display:flex; justify-content:space-between;"><span style="color:#555;">UPTIME</span><span id="uptime">0h</span></div>
-                    <div style="display:flex; justify-content:space-between;"><span style="color:#555;">LAST TRADE</span><span id="lastTrade">-</span></div>
-                    <div style="display:flex; justify-content:space-between;"><span style="color:#555;">STRATEGY</span><span style="color:#00ff00;">QUANT</span></div>
-                </div>
+            <div class="header-item">
+                <span class="header-value" id="clock">00:00:00</span>
             </div>
         </div>
     </div>
     
     <div class="ticker">
         <span class="ticker-label">NEWS</span>
-        <div class="ticker-content" id="newsTicker">
-            Quant Engine Running | Scanning Polymarket Markets | AI Analysis Active | Paper Trading Mode
+        <div class="ticker-content" id="ticker">
+            QUANT ENGINE ACTIVE | PAPER TRADING MODE | SCANNING POLYMARKET MARKETS | 1.5S REFRESH RATE
         </div>
     </div>
     
-    <div class="status-bar">
+    <div class="main-grid">
+        <!-- Panel 1: Heatmap -->
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">MARKET HEATMAP</span>
+                <span class="panel-badge" id="heatCount">0</span>
+            </div>
+            <div class="panel-body">
+                <div class="heatmap" id="heatmap"></div>
+            </div>
+        </div>
+        
+        <!-- Panel 2: Trades -->
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">ACTIVE POSITIONS</span>
+                <span class="panel-badge" id="tradeCount">0</span>
+            </div>
+            <div class="panel-body" id="tradesList"></div>
+        </div>
+        
+        <!-- Panel 3: Analytics -->
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">ANALYTICS</span>
+                <span class="panel-badge">REAL-TIME</span>
+            </div>
+            <div class="panel-body">
+                <div class="analytics-grid">
+                    <div class="an-card">
+                        <div class="an-value" id="totalTrades">0</div>
+                        <div class="an-label">TRADES</div>
+                    </div>
+                    <div class="an-card">
+                        <div class="an-value pos" id="winRate">0%</div>
+                        <div class="an-label">WIN RATE</div>
+                    </div>
+                    <div class="an-card">
+                        <div class="an-value" id="avgEdge">0%</div>
+                        <div class="an-label">AVG EDGE</div>
+                    </div>
+                    <div class="an-card">
+                        <div class="an-value" id="maxEdge">0%</div>
+                        <div class="an-label">MAX EDGE</div>
+                    </div>
+                </div>
+                
+                <div class="panel-title" style="margin-bottom:6px;">SECTORS</div>
+                <div class="sector-list" id="sectors"></div>
+                
+                <div class="panel-title" style="margin:10px 0 6px;">AI INSIGHTS</div>
+                <div class="ai-list" id="aiInsights"></div>
+            </div>
+        </div>
+        
+        <!-- Panel 4: Order Book -->
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">ORDER BOOK</span>
+                <span class="panel-badge" id="obMarket">-</span>
+            </div>
+            <div class="panel-body">
+                <div class="ob-container" id="orderBook"></div>
+            </div>
+        </div>
+        
+        <!-- Panel 5: Sparklines -->
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">SPARKLINES</span>
+                <span class="panel-badge">LIVE</span>
+            </div>
+            <div class="panel-body">
+                <div class="spark-grid" id="sparklines"></div>
+            </div>
+        </div>
+        
+        <!-- Panel 6: Portfolio -->
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">PORTFOLIO</span>
+                <span class="panel-badge">PAPER</span>
+            </div>
+            <div class="panel-body">
+                <div class="portfolio-grid">
+                    <div class="port-card">
+                        <div class="port-value" id="totalCost">$0</div>
+                        <div class="port-label">TOTAL EXPOSURE</div>
+                    </div>
+                    <div class="port-card">
+                        <div class="port-value" id="avgSize">$0</div>
+                        <div class="port-label">AVG POSITION</div>
+                    </div>
+                    <div class="port-card">
+                        <div class="port-value" id="maxPos">$0</div>
+                        <div class="port-label">LARGEST</div>
+                    </div>
+                    <div class="port-card">
+                        <div class="port-value" id="cashRem">$0</div>
+                        <div class="port-label">CASH</div>
+                    </div>
+                </div>
+                
+                <div class="panel-title" style="margin:12px 0 6px;">SYSTEM</div>
+                <div style="font-size:10px; color:#555; display:flex; flex-direction:column; gap:4px;">
+                    <div style="display:flex; justify-content:space-between;"><span>MARKETS</span><span id="sysMarkets" style="color:#ff9900;">0</span></div>
+                    <div style="display:flex; justify-content:space-between;"><span>VOLUME</span><span id="sysVolume" style="color:#ff9900;">$0</span></div>
+                    <div style="display:flex; justify-content:space-between;"><span>API ERR</span><span id="sysErrors" style="color:#ff0000;">0</span></div>
+                    <div style="display:flex; justify-content:space-between;"><span>UPTIME</span><span id="sysUptime" style="color:#ff9900;">0h</span></div>
+                    <div style="display:flex; justify-content:space-between;"><span>LAST</span><span id="sysLast" style="color:#ff9900;">-</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="footer">
+        <div class="cmdline">
+            <span class="cmd-prompt">&gt;</span>
+            <input type="text" class="cmd-input" id="cmdInput" placeholder="CMD...">
+        </div>
         <div class="status-item">
-            <span class="status-dot green" id="statusDot"></span>
+            <div class="status-dot green" id="statusDot"></div>
             <span id="statusText">CONNECTED</span>
-        </div>
-        <div class="status-item">
-            <span>MARKETS: <span id="statusMarkets">0</span></span>
-        </div>
-        <div class="status-item">
-            <span>API: <span id="statusApi">OK</span></span>
         </div>
         <div class="status-item">
             <span>RENDER.COM CLOUD</span>
         </div>
     </div>
     
-    <div class="cmdline">
-        <span class="cmdline-prompt">&gt;</span>
-        <input type="text" class="cmdline-input" placeholder="Enter command..." id="cmdInput">
-    </div>
-    
     <script>
-        function formatNum(n) { 
+        function formatNum(n) {
             if(n >= 1e9) return (n/1e9).toFixed(1) + 'B';
             if(n >= 1e6) return (n/1e6).toFixed(1) + 'M';
             if(n >= 1e3) return (n/1e3).toFixed(1) + 'K';
@@ -942,17 +986,29 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
             return Math.round(hrs) + 'h';
         }
         
+        function priceColor(change) {
+            if(change > 0) return '#00ff00';
+            if(change < 0) return '#ff0000';
+            return '#666666';
+        }
+        
         function catColor(cat) {
-            const colors = {
-                'Sports': 'cat-sports',
-                'Crypto': 'cat-crypto', 
-                'Politics': 'cat-politics',
-                'Business': 'cat-business',
-                'Tech': 'cat-tech',
-                'Entertainment': 'cat-sports',
-                'Science': 'cat-crypto'
-            };
-            return colors[cat] || '';
+            const colors = { 'Sports': '#4a9eff', 'Crypto': '#ff9900', 'Politics': '#ff4a4a', 'Business': '#4aff4a', 'Tech': '#ff4aff', 'Entertainment': '#4a9eff' };
+            return colors[cat] || '#888888';
+        }
+        
+        function createSparkline(data) {
+            if(!data || data.length < 2) return '';
+            const w = 80, h = 25;
+            const min = Math.min(...data), max = Math.max(...data);
+            const range = max - min || 1;
+            const points = data.map((v, i) => {
+                const x = (i / (data.length - 1)) * w;
+                const y = h - ((v - min) / range) * h;
+                return x + ',' + y;
+            }).join(' ');
+            const color = data[data.length-1] >= data[0] ? '#00ff00' : '#ff0000';
+            return '<svg width="' + w + '" height="' + h + '" style="display:block;"><polyline points="' + points + '" fill="none" stroke="' + color + '" stroke-width="1"/></svg>';
         }
         
         async function update() {
@@ -960,108 +1016,147 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
                 const s = await fetch('/api/status').then(r=>r.json());
                 const t = await fetch('/api/trades').then(r=>r.json());
                 const m = await fetch('/api/markets').then(r=>r.json());
+                const ob = await fetch('/api/orderbook').then(r=>r.json());
+                const hist = await fetch('/api/sparkline').then(r=>r.json());
                 
                 // Header
                 document.getElementById('clock').textContent = new Date().toLocaleTimeString();
                 document.getElementById('cycle').textContent = s.cycle;
-                document.getElementById('status').textContent = s.status;
                 document.getElementById('portfolio').textContent = '$' + s.portfolio.toFixed(0);
+                document.getElementById('status').textContent = s.status;
                 
-                // Markets
-                document.getElementById('marketCount').textContent = m.markets.length;
-                const marketsHtml = m.markets.slice(0, 15).map(x => {
+                // Heatmap
+                const markets = m.markets || [];
+                document.getElementById('heatCount').textContent = markets.length;
+                const maxVol = Math.max(...markets.map(m=>m.volume), 1);
+                const heatmapHtml = markets.slice(0, 50).map(x => {
                     const chg = x.oneDayChange || 0;
-                    const chgClass = chg >= 0 ? 'price-up' : 'price-down';
-                    const chgSign = chg >= 0 ? '+' : '';
-                    return '<tr><td class="' + catColor(x.category) + '">' + x.category.substring(0,4) + '</td><td>' + (x.price*100).toFixed(1) + '%</td><td class="' + chgClass + '">' + chgSign + (chg*100).toFixed(1) + '%</td><td>' + formatNum(x.volume) + '</td></tr>';
+                    const intensity = Math.min(Math.abs(chg) * 10, 1);
+                    const r = chg > 0 ? 0 : Math.floor(255 * intensity);
+                    const g = chg < 0 ? 0 : Math.floor(255 * intensity);
+                    const b = 0;
+                    const bg = chg === 0 ? '#1a1a1a' : 'rgb(' + r + ',' + g + ',' + b + ')';
+                    const size = 0.3 + (x.volume / maxVol) * 0.7;
+                    return '<div class="heat-cell" style="background:' + bg + ';font-size:' + (8 + size * 4) + 'px;"><span class="price">' + (x.price*100).toFixed(0) + '</span><span class="vol">' + formatNum(x.volume).replace('M','M').replace('K','K') + '</span><div class="tooltip">' + x.category + ' | ' + (x.price*100).toFixed(1) + '% | ' + formatNum(x.volume) + '</div></div>';
                 }).join('');
-                document.getElementById('marketTable').innerHTML = marketsHtml;
+                document.getElementById('heatmap').innerHTML = heatmapHtml;
                 
                 // Trades
-                document.getElementById('tradeCount').textContent = t.trades.length;
-                const tradesHtml = t.trades.slice(0, 8).map(x => {
+                const trades = t.trades || [];
+                document.getElementById('tradeCount').textContent = trades.length;
+                const tradesHtml = trades.slice(0, 10).map((x, i) => {
                     const isSell = x.action.includes('SELL');
-                    return '<div class="trade-card ' + (isSell ? 'sell' : '') + '"><div class="trade-header"><span class="trade-action ' + (isSell ? 'sell' : 'buy') + '">' + x.action + '</span><span style="color:#666;font-size:9px;">' + x.category + '</span></div><div class="trade-question">' + x.question + '</div><div class="trade-meta"><span>$' + x.size.toFixed(2) + '</span><span>@ ' + (x.price*100).toFixed(1) + '%</span><span>Edge: ' + (x.edge*100).toFixed(1) + '%</span></div><div class="trade-stats"><div class="trade-stat"><div class="trade-stat-value">' + (x.prob_estimate*100).toFixed(1) + '%</div><div class="trade-stat-label">AI PROB</div></div><div class="trade-stat"><div class="trade-stat-value">' + (x.kelly*100).toFixed(1) + '%</div><div class="trade-stat-label">KELLY</div></div><div class="trade-stat"><div class="trade-stat-value">' + x.spread + '%</div><div class="trade-stat-label">SPREAD</div></div><div class="trade-stat"><div class="trade-stat-value">' + x.method + '</div><div class="trade-stat-label">METHOD</div></div></div></div>';
+                    return '<div class="trade-card ' + (isSell ? 'sell' : '') + '"><div class="trade-header"><span class="trade-action ' + (isSell ? 'sell' : 'buy') + '">' + x.action + '</span><span class="trade-cat">' + x.category + '</span></div><div class="trade-question">' + x.question + '</div><div class="trade-stats"><div class="trade-stat"><div class="trade-stat-val">$' + x.size.toFixed(2) + '</div><div class="trade-stat-label">SIZE</div></div><div class="trade-stat"><div class="trade-stat-val">' + (x.price*100).toFixed(1) + '%</div><div class="trade-stat-label">PRICE</div></div><div class="trade-stat"><div class="trade-stat-val">' + (x.edge*100).toFixed(1) + '%</div><div class="trade-stat-label">EDGE</div></div><div class="trade-stat"><div class="trade-stat-val">' + (x.prob_estimate*100).toFixed(0) + '%</div><div class="trade-stat-label">AI</div></div></div></div>';
                 }).join('');
-                document.getElementById('tradesList').innerHTML = tradesHtml || '<div style="color:#444;text-align:center;padding:20px;">NO ACTIVE POSITIONS</div>';
+                document.getElementById('tradesList').innerHTML = tradesHtml || '<div style="color:#333;text-align:center;padding:20px;">NO POSITIONS</div>';
                 
                 // Analytics
                 document.getElementById('totalTrades').textContent = s.trades_executed;
                 const winRate = (s.wins + s.losses) > 0 ? (s.wins / (s.wins + s.losses) * 100) : 0;
                 document.getElementById('winRate').textContent = winRate.toFixed(0) + '%';
-                
-                const edges = t.trades.map(x => x.edge);
+                const edges = trades.map(x => x.edge);
                 const avgEdge = edges.length ? (edges.reduce((a,b)=>a+b,0) / edges.length * 100).toFixed(1) : 0;
                 const maxEdge = edges.length ? (Math.max(...edges) * 100).toFixed(1) : 0;
                 document.getElementById('avgEdge').textContent = avgEdge + '%';
                 document.getElementById('maxEdge').textContent = maxEdge + '%';
-                
-                // AI Insights
-                const insights = s.ai_insights || [];
-                const aiHtml = insights.map(x => {
-                    const icon = x.type === 'HOT' ? '🔥' : x.type === 'EDGE' ? '📈' : x.type === 'BIAS' ? '⚖️' : '🤖';
-                    return '<div class="ai-insight"><div class="ai-icon">' + icon + '</div><div class="ai-content"><div class="ai-type">' + x.type + '</div><div class="ai-message">' + x.message + '</div></div></div>';
-                }).join('');
-                document.getElementById('aiInsights').innerHTML = aiHtml || '<div style="color:#444;font-size:10px;text-align:center;">ANALYZING MARKETS...</div>';
                 
                 // Sectors
                 const sectors = m.market_insights || [];
                 const totalVol = sectors.reduce((a,b)=>a+b.volume,0);
                 const sectorHtml = sectors.slice(0,6).map(x => {
                     const pct = totalVol ? (x.volume / totalVol * 100) : 0;
-                    return '<div class="sector-item"><div class="sector-header"><span class="sector-name">' + x.category + '</span><span class="sector-vol">$' + formatNum(x.volume) + '</span></div><div class="sector-bar"><div class="sector-fill" style="width:' + pct + '%"></div></div></div>';
+                    return '<div class="sector-item"><div class="sector-hdr"><span class="sector-name">' + x.category + '</span><span class="sector-vol">' + formatNum(x.volume) + '</span></div><div class="sector-bar"><div class="sector-fill" style="width:' + pct + '%"></div></div></div>';
                 }).join('');
-                document.getElementById('sectorChart').innerHTML = sectorHtml || '<div style="color:#444;font-size:10px;">NO DATA</div>';
+                document.getElementById('sectors').innerHTML = sectorHtml || '<div style="color:#333;">NO DATA</div>';
                 
-                // Performance
-                document.getElementById('marketsScanned').textContent = s.markets_scanned;
-                document.getElementById('totalVol').textContent = '$' + formatNum(s.total_volume_scanned);
+                // AI Insights
+                const insights = s.ai_insights || [];
+                const aiHtml = insights.map(x => {
+                    const icon = x.type === 'HOT' ? '&#128293;' : x.type === 'EDGE' ? '&#128200;' : x.type === 'BIAS' ? '&#9878;' : '&#129302;';
+                    return '<div class="ai-item"><span class="ai-icon">' + icon + '</span><div><div class="ai-type">' + x.type + '</div><div class="ai-msg">' + x.message + '</div></div></div>';
+                }).join('');
+                document.getElementById('aiInsights').innerHTML = aiHtml || '<div style="color:#333;font-size:9px;">ANALYZING...</div>';
                 
-                const totalSize = t.trades.reduce((a,b)=>a+b.size,0);
-                const avgSize = t.trades.length ? totalSize / t.trades.length : 0;
-                const totalCost = t.trades.reduce((a,b)=>a+b.cost,0);
+                // Order Book
+                const orderbook = ob.order_book || { bids: [], asks: [], market: '-' };
+                document.getElementById('obMarket').textContent = orderbook.market || '-';
+                const maxSize = Math.max(
+                    ...orderbook.bids.map(b=>b.size),
+                    ...orderbook.asks.map(a=>a.size),
+                    1
+                );
+                let obHtml = '<div class="ob-header"><span>SIZE</span><span>PRICE</span><span>SIZE</span></div>';
                 
-                document.getElementById('avgTradeSize').textContent = '$' + avgSize.toFixed(2);
+                orderbook.bids.slice(0, 5).reverse().forEach(b => {
+                    const barW = (b.size / maxSize) * 50;
+                    obHtml += '<div class="ob-row"><div class="ob-size">' + b.size.toFixed(0) + '</div><div class="ob-bar bid" style="width:' + barW + '%;right:' + (50 - barW/2) + '%;"></div><div class="ob-price bid">' + (b.price*100).toFixed(1) + '%</div></div>';
+                });
+                
+                obHtml += '<div class="ob-spread">SPREAD: ' + (orderbook.bids[0] && orderbook.asks[0] ? ((orderbook.asks[0].price - orderbook.bids[0].price) * 100).toFixed(2) : 0) + '%</div>';
+                
+                orderbook.asks.slice(0, 5).forEach(a => {
+                    const barW = (a.size / maxSize) * 50;
+                    obHtml += '<div class="ob-row"><div class="ob-size">' + a.size.toFixed(0) + '</div><div class="ob-bar ask" style="width:' + barW + '%;left:' + (50 - barW/2) + '%;"></div><div class="ob-price ask">' + (a.price*100).toFixed(1) + '%</div></div>';
+                });
+                
+                document.getElementById('orderBook').innerHTML = obHtml;
+                
+                // Sparklines
+                const sparkData = hist.sparklines || [];
+                const sparkHtml = sparkData.slice(0, 10).map(x => {
+                    const chg = x.change || 0;
+                    return '<div class="spark-item"><div class="spark-header"><span class="spark-cat">' + x.category + '</span><span class="spark-price">' + (x.price*100).toFixed(1) + '%</span></div><div class="spark-chart">' + createSparkline(x.sparkline) + '</div><div class="spark-change ' + (chg >= 0 ? 'up' : 'down') + '">' + (chg >= 0 ? '+' : '') + (chg*100).toFixed(1) + '%</div></div>';
+                }).join('');
+                document.getElementById('sparklines').innerHTML = sparkHtml || '<div style="color:#333;">NO DATA</div>';
+                
+                // Portfolio
+                const totalCost = trades.reduce((a,b)=>a+b.cost,0);
+                const avgSize = trades.length ? totalCost / trades.length : 0;
+                const maxPos = trades.length ? Math.max(...trades.map(t=>t.size)) : 0;
+                const cash = s.portfolio - totalCost;
+                
                 document.getElementById('totalCost').textContent = '$' + totalCost.toFixed(2);
+                document.getElementById('avgSize').textContent = '$' + avgSize.toFixed(2);
+                document.getElementById('maxPos').textContent = '$' + maxPos.toFixed(2);
+                document.getElementById('cashRem').textContent = '$' + cash.toFixed(2);
                 
                 // System
-                document.getElementById('apiErrors').textContent = s.api_errors;
-                document.getElementById('uptime').textContent = formatUptime(s.startup_time);
-                document.getElementById('lastTrade').textContent = s.last_trade_time ? formatTime(s.last_trade_time) : 'NONE';
+                document.getElementById('sysMarkets').textContent = s.markets_scanned;
+                document.getElementById('sysVolume').textContent = '$' + formatNum(s.total_volume_scanned);
+                document.getElementById('sysErrors').textContent = s.api_errors;
+                document.getElementById('sysUptime').textContent = formatUptime(s.startup_time);
+                document.getElementById('sysLast').textContent = s.last_trade_time ? formatTime(s.last_trade_time) : '-';
                 
                 // Status
-                document.getElementById('statusMarkets').textContent = m.markets.length;
                 document.getElementById('statusDot').className = 'status-dot ' + (s.status === 'RUNNING' ? 'green' : 'red');
                 document.getElementById('statusText').textContent = s.status === 'RUNNING' ? 'ACTIVE' : 'ERROR';
-                
-                // Top Opportunities
-                const oppHtml = m.markets.slice(0,5).map(x => {
-                    return '<div style="padding:6px;margin-bottom:4px;background:#0d0d0d;border-left:2px solid #ff6600;"><div style="display:flex;justify-content:space-between;"><span style="color:#888;font-size:9px;">' + x.category + '</span><span style="color:#00ff00;font-size:9px;">VOL: ' + formatNum(x.volume) + '</span></div><div style="font-size:10px;margin:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + x.question.substring(0,40) + '</div><div style="display:flex;justify-content:space-between;font-size:9px;"><span style="color:#666;">$' + (x.price*100).toFixed(1) + '</span><span style="color:' + ((x.oneDayChange||0) >= 0 ? '#00ff00':'#ff0000') + '">' + ((x.oneDayChange||0)*100).toFixed(1) + '%</span></div></div>';
-                }).join('');
-                document.getElementById('opportunities').innerHTML = oppHtml;
                 
             } catch(e) {
                 console.error(e);
             }
         }
         
-        // Command line
+        // Command input
         document.getElementById('cmdInput').addEventListener('keypress', function(e) {
             if(e.key === 'Enter') {
                 const cmd = this.value.toUpperCase();
-                if(cmd === 'REFRESH') {
-                    update();
-                } else if(cmd === 'STATUS') {
-                    alert('System Status: Running');
-                } else if(cmd === 'HELP') {
-                    alert('Commands: REFRESH, STATUS, CLEAR');
-                }
+                if(cmd === 'REFRESH') update();
+                else if(cmd === 'CLEAR') this.value = '';
+                else if(cmd.startsWith('HELP')) alert('Commands: REFRESH, CLEAR');
                 this.value = '';
             }
         });
         
+        // Fn keys
+        document.querySelectorAll('.fn-key').forEach(k => {
+            k.addEventListener('click', function() {
+                document.querySelectorAll('.fn-key').forEach(k => k.classList.remove('active'));
+                this.classList.add('active');
+            });
+        });
+        
         update();
-        setInterval(update, 5000);
+        setInterval(update, 1500);
     </script>
 </body>
 </html>'''
@@ -1072,7 +1167,7 @@ def dashboard():
 
 @app.route('/')
 def index():
-    return '<h1>Polymarket Quant Trader</h1><p><a href="/dashboard">Open Bloomberg Terminal</a></p>'
+    return '<h1>Polymarket Quant Trader</h1><p><a href="/dashboard">Open Bloomberg Terminal Pro</a></p>'
 
 @app.route('/api/status')
 def api_status():
@@ -1109,6 +1204,32 @@ def api_markets():
         'market_insights': trading_state.get('market_insights', [])
     })
 
+@app.route('/api/orderbook')
+def api_orderbook():
+    return jsonify({'order_book': trading_state.get('order_book', {'bids': [], 'asks': [], 'market': '-'})})
+
+@app.route('/api/sparkline')
+def api_sparkline():
+    hist_data = trading_state.get('historical_data', {})
+    markets = trading_state.get('top_markets', [])
+    
+    sparklines = []
+    for m in markets[:10]:
+        mid = m.get('id', '')
+        if mid in hist_data:
+            hd = hist_data[mid]
+            sparklines.append({
+                'id': mid,
+                'question': hd.get('question', '')[:30],
+                'price': hd.get('current', 0),
+                'category': hd.get('category', 'Other'),
+                'volume': hd.get('volume', 0),
+                'sparkline': hd.get('sparkline', []),
+                'change': m.get('oneDayChange', 0)
+            })
+    
+    return jsonify({'sparklines': sparklines})
+
 @app.route('/api/ai')
 def api_ai():
     return jsonify({
@@ -1124,5 +1245,5 @@ def api_logs():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print(f"Starting Polymarket Bloomberg Terminal on port {port}")
+    print(f"Starting Bloomberg Terminal Pro on port {port}")
     app.run(host='0.0.0.0', port=port)
