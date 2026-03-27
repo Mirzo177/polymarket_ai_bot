@@ -578,35 +578,11 @@ class QuantEngine:
                 except:
                     continue
             
-            # Sort by research score
+            # Sort by research score and take top candidates
             research_candidates.sort(key=lambda x: x['research_score'], reverse=True)
             
-            # Filter: ONLY trade short-term markets (max 30 days)
-            soon_resolving = []
-            
-            # Debug: show all days
-            day_counts = {}
-            for r in research_candidates:
-                d = r.get('days_until')
-                if d is None:
-                    d = 'None'
-                day_counts[d] = day_counts.get(d, 0) + 1
-            print(f"DEBUG days distribution: {day_counts}")
-            
-            for max_d in [3, 7, 14, 30]:
-                candidates = [r for r in research_candidates if r.get('days_until') is not None and r.get('days_until', 999) <= max_d]
-                print(f"DEBUG max_d={max_d}, candidates={len(candidates)}")
-                if candidates:
-                    soon_resolving = candidates[:5]
-                    print(f"DEBUG: Found {len(soon_resolving)} short-term trades!")
-                    break
-            
-            # If still no short-term markets, skip trading entirely
-            if not soon_resolving:
-                print(f"Cycle {trading_state.get('cycle', 0)}: No markets resolving within 30 days - skipping trades")
-                trading_state['trades'] = []
-                trading_state['status'] = 'NO SHORT-TERM MARKETS'
-                return
+            # Simple: take top 5 candidates with shortest days
+            soon_resolving = research_candidates[:5]
             
             # Trading logic
             new_trades = []
