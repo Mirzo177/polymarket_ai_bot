@@ -430,6 +430,7 @@ class QuantEngine:
     def scan_and_trade(self):
         global trading_state
         try:
+            trading_state['cycle'] = trading_state.get('cycle', 0) + 1
             trading_state['status'] = 'SCANNING'
             
             # Load persisted trades
@@ -608,7 +609,6 @@ class QuantEngine:
                 return
             
             # Trading logic
-            trading_state['cycle'] += 1
             new_trades = []
             
             for research in soon_resolving[:5]:  # Take top 5 candidates
