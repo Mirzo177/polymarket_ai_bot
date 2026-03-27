@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Polymarket Quant Trading Engine - Bloomberg Terminal Pro
+Polymarket Quant Trading Engine - Bloomberg Terminal Pro v2
+With Trade Resolution Tracking
 """
 import os
 import json
@@ -21,6 +22,7 @@ CORS(app)
 trading_state = {
     'cycle': 0,
     'trades': [],
+    'resolved_trades': [],
     'portfolio': 1000,
     'portfolio_start': 1000,
     'trades_executed': 0,
@@ -36,15 +38,11 @@ trading_state = {
     'total_exposure': 0,
     'strategy_stats': defaultdict(int),
     'edge_history': [],
-    'pending_positions': [],
-    'market_insights': [],
     'top_markets': [],
-    'price_alerts': [],
     'ai_insights': [],
-    'sectors': defaultdict(lambda: {'volume': 0, 'markets': 0, 'avg_price': 0}),
+    'sectors': {},
     'order_book': {'bids': [], 'asks': []},
-    'historical_data': {},
-    'portfolio_history': []
+    'historical_data': {}
 }
 
 def save_json(filename, data):
@@ -53,6 +51,13 @@ def save_json(filename, data):
             json.dump(data, f, indent=2, default=str)
     except:
         pass
+
+def load_json(filename):
+    try:
+        with open(f'/tmp/{filename}', 'r') as f:
+            return json.load(f)
+    except:
+        return None
 
 class PolymarketAPI:
     def __init__(self):
@@ -76,16 +81,86 @@ class PolymarketAPI:
             trading_state['api_errors'] += 1
         return []
     
-    def get_order_book(self, condition_id):
+    def get_market_by_id(self, market_id):
         try:
-            resp = httpx.get(f"{self.gamma_url}/orderbook", 
-                            params={'conditionId': condition_id},
-                            timeout=10)
+            resp = httpx.get(f"{self.gamma_url}/markets", 
+                            params={'id': market_id},
+                            timeout=15)
             if resp.status_code == 200:
-                return resp.json()
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 0:
+                    return data[0]
         except:
             pass
         return None
+    
+    def check_resolved_markets(self, trades, markets):
+        market_prices = {}
+        market_status = {}
+        
+        for m in markets:
+            mid = m.get('id')
+            if mid:
+                prices = m.get('outcomePrices')
+                if prices and isinstance(prices, str):
+                    try:
+                        prices = json.loads(prices)
+                    except:
+                        prices = [0.5]
+                elif prices:
+                    pass
+                else:
+                    prices = [0.5]
+                
+                market_prices[mid] = float(prices[0]) if prices else 0.5
+                market_status[mid] = {
+                    'closed': m.get('closed', False),
+                    'resolved': m.get('resolved', False),
+                    'endDate': m.get('endDate')
+                }
+        
+        resolved = []
+        still_open = []
+        
+        for trade in trades:
+            if trade.get('status') == 'RESOLVED':
+                resolved.append(trade)
+                continue
+                
+            market_id = trade.get('market_id')
+            current_price = market_prices.get(market_id, trade.get('price', 0.5))
+            trade['current_price'] = current_price
+            
+            status_info = market_status.get(market_id, {})
+            
+            if status_info.get('resolved') or status_info.get('closed'):
+                trade['status'] = 'RESOLVED'
+                trade['resolved_at'] = datetime.now(timezone.utc).isoformat()
+                
+                if trade.get('action', '').includes('BUY'):
+                    if current_price > trade.get('entry_price', trade.get('price', 0)):
+                        trade['result'] = 'WON'
+                        trade['profit'] = (current_price - trade.get('entry_price', trade.get('price', 0))) * trade.get('size', 0) * 10
+                    else:
+                        trade['result'] = 'LOST'
+                        trade['profit'] = (trade.get('entry_price', trade.get('price', 0)) - current_price) * trade.get('size', 0) * 10
+                else:
+                    if current_price < trade.get('entry_price', trade.get('price', 0)):
+                        trade['result'] = 'WON'
+                    else:
+                        trade['result'] = 'LOST'
+                
+                resolved.append(trade)
+            else:
+                if trade.get('endDate'):
+                    try:
+                        end_dt = datetime.fromisoformat(trade['endDate'].replace('Z', '+00:00'))
+                        trade['days_to_resolve'] = max(0, (end_dt - datetime.now(timezone.utc)).days)
+                    except:
+                        trade['days_to_resolve'] = None
+                still_open.append(trade)
+        
+        return still_open, resolved
 
 def categorize_market(question):
     q = question.lower()
@@ -144,23 +219,6 @@ class AIAnalyzer:
         if hot_markets:
             insights.append({'type': 'HOT', 'message': f'{len(hot_markets)} high-volume markets', 'priority': 'HIGH'})
         
-        price_ranges = {'low': 0, 'mid': 0, 'high': 0}
-        for m in markets:
-            if m['price'] < 0.2:
-                price_ranges['low'] += 1
-            elif m['price'] < 0.6:
-                price_ranges['mid'] += 1
-            else:
-                price_ranges['high'] += 1
-        
-        if price_ranges['low'] > price_ranges['high']:
-            insights.append({'type': 'BIAS', 'message': 'Market favors underdogs', 'priority': 'MEDIUM'})
-        
-        if trades:
-            avg_edge = sum(t['edge'] for t in trades) / len(trades)
-            if avg_edge > 0.05:
-                insights.append({'type': 'EDGE', 'message': f'Edge: {avg_edge*100:.1f}%', 'priority': 'HIGH'})
-        
         return insights[:5]
 
 def generate_sparkline_data(current_price):
@@ -185,10 +243,28 @@ class QuantEngine:
         global trading_state
         try:
             trading_state['status'] = 'SCANNING'
+            
+            # Load persisted trades
+            trades_data = load_json('trades_history.json') or {'open': [], 'resolved': []}
+            all_trades = trades_data.get('open', []) + trades_data.get('resolved', [])
+            
+            # Get markets
             markets = self.api.get_markets(50)
             
+            # Check for resolved markets
+            open_trades, resolved_trades = self.api.check_resolved_markets(all_trades, markets)
+            
+            # Update resolved trades
+            if resolved_trades:
+                trading_state['resolved_trades'] = resolved_trades[-100:]
+                wins = sum(1 for t in resolved_trades if t.get('result') == 'WON')
+                losses = sum(1 for t in resolved_trades if t.get('result') == 'LOST')
+                trading_state['wins'] = wins
+                trading_state['losses'] = losses
+            
+            # Process markets
             market_data = []
-            sectors = defaultdict(lambda: {'volume': 0, 'markets': 0, 'prices': []})
+            sectors = defaultdict(lambda: {'volume': 0, 'markets': 0})
             historical_data = {}
             
             for m in markets:
@@ -211,10 +287,8 @@ class QuantEngine:
                         category = categorize_market(m.get('question', ''))
                         sectors[category]['volume'] += vol
                         sectors[category]['markets'] += 1
-                        sectors[category]['prices'].append(price)
                         
-                        market_id = m.get('id', '')
-                        historical_data[market_id] = {
+                        historical_data[m.get('id')] = {
                             'question': m.get('question', ''),
                             'current': price,
                             'sparkline': generate_sparkline_data(price),
@@ -223,7 +297,7 @@ class QuantEngine:
                         }
                         
                         market_data.append({
-                            'id': market_id,
+                            'id': m.get('id'),
                             'question': m.get('question', ''),
                             'volume': vol,
                             'liquidity': liq,
@@ -235,7 +309,6 @@ class QuantEngine:
                             'volume24hr': float(m.get('volume24hr') or 0),
                             'oneDayChange': float(m.get('oneDayPriceChange') or 0),
                             'oneHourChange': float(m.get('oneHourPriceChange') or 0),
-                            'oneWeekChange': float(m.get('oneWeekPriceChange') or 0),
                             'endDate': m.get('endDate'),
                             'active': m.get('active', True),
                             'conditionId': m.get('conditionId')
@@ -246,6 +319,7 @@ class QuantEngine:
             trading_state['historical_data'] = historical_data
             trading_state['sectors'] = dict(sectors)
             
+            # Filter liquid markets
             liquid = [m for m in market_data if m['volume'] > 5000 and m['liquidity'] > 2000]
             liquid.sort(key=lambda x: x['volume'], reverse=True)
             
@@ -253,6 +327,7 @@ class QuantEngine:
             trading_state['markets_scanned'] = len(liquid)
             trading_state['total_volume_scanned'] = sum(m['volume'] for m in liquid)
             
+            # Market insights
             category_vol = defaultdict(float)
             for m in liquid:
                 category_vol[m['category']] += m['volume']
@@ -261,20 +336,15 @@ class QuantEngine:
                 for k, v in sorted(category_vol.items(), key=lambda x: -x[1])[:8]
             ]
             
-            trading_state['ai_insights'] = self.ai.analyze(liquid, trading_state.get('trades', []))
+            trading_state['ai_insights'] = self.ai.analyze(liquid, open_trades)
             
-            if liquid:
-                top_market = liquid[0]
-                ob = self.api.get_order_book(top_market.get('conditionId'))
-                if ob:
-                    bids = ob.get('bids', [])[:5]
-                    asks = ob.get('asks', [])[:5]
-                    trading_state['order_book'] = {
-                        'bids': [{'price': float(b.get('price', 0)), 'size': float(b.get('size', 0))} for b in bids],
-                        'asks': [{'price': float(a.get('price', 0)), 'size': float(a.get('size', 0))} for a in asks],
-                        'market': top_market.get('question', '')[:40]
-                    }
+            # Get current prices for open trades
+            for trade in open_trades:
+                market_id = trade.get('market_id')
+                if market_id in historical_data:
+                    trade['current_price'] = historical_data[market_id]['current']
             
+            # Trading logic
             trading_state['cycle'] += 1
             new_trades = []
             
@@ -301,12 +371,16 @@ class QuantEngine:
                                 'action': action,
                                 'size': round(size, 2),
                                 'price': round(price, 4),
+                                'entry_price': round(price, 4),
                                 'cost': round(size * price, 2),
                                 'question': m['question'][:60],
+                                'market_id': m['id'],
                                 'edge': round(edge, 4),
                                 'volume': m['volume'],
                                 'strategy': 'FUNDAMENTAL',
-                                'result': 'PENDING',
+                                'status': 'PENDING',
+                                'result': None,
+                                'profit': 0,
                                 'category': m['category'],
                                 'kelly': round(kelly_result['kelly_fraction'], 4),
                                 'bid': round(m['bid'], 4),
@@ -314,49 +388,47 @@ class QuantEngine:
                                 'spread': round(m['spread'], 2),
                                 'prob_estimate': round(prob_result['probability'], 4),
                                 'confidence': round(prob_result['confidence'], 2),
-                                'method': prob_result['method']
+                                'method': prob_result['method'],
+                                'endDate': m.get('endDate'),
+                                'current_price': price,
+                                'days_to_resolve': None
                             }
+                            
+                            if trade['endDate']:
+                                try:
+                                    end_dt = datetime.fromisoformat(trade['endDate'].replace('Z', '+00:00'))
+                                    trade['days_to_resolve'] = max(0, (end_dt - datetime.now(timezone.utc)).days)
+                                except:
+                                    pass
+                            
                             new_trades.append(trade)
                             trading_state['strategy_stats']['FUNDAMENTAL'] += 1
                 except:
                     continue
             
-            # Load persisted trades
-            try:
-                with open('/tmp/trades_history.json', 'r') as f:
-                    trades_history = json.load(f)
-            except:
-                trades_history = []
+            # Save trades
+            open_trades = new_trades + open_trades
             
-            # Add new trades to history
+            # Save to file
+            try:
+                with open('/tmp/trades_history.json', 'w') as f:
+                    json.dump({'open': open_trades[-100:], 'resolved': trading_state.get('resolved_trades', [])[-100:]}, f, indent=2, default=str)
+            except:
+                pass
+            
+            trading_state['trades'] = open_trades[-20:]
+            trading_state['trades_executed'] = len(open_trades) + len(trading_state.get('resolved_trades', []))
+            trading_state['total_exposure'] = sum(t['cost'] for t in open_trades)
+            
             if new_trades:
-                trades_history.extend(new_trades)
-                # Keep last 100 trades
-                trades_history = trades_history[-100:]
-                # Save to file
-                try:
-                    with open('/tmp/trades_history.json', 'w') as f:
-                        json.dump(trades_history, f, indent=2)
-                except:
-                    pass
-                
-                trading_state['trades'] = new_trades
-                trading_state['trades_executed'] = len(trades_history)
                 trading_state['last_trade_time'] = datetime.now(timezone.utc).isoformat()
                 trading_state['edge_history'].extend([t['edge'] for t in new_trades])
                 if len(trading_state['edge_history']) > 100:
                     trading_state['edge_history'] = trading_state['edge_history'][-100:]
-            else:
-                trading_state['trades'] = trades_history[-20:] if trades_history else []
-                trading_state['trades_executed'] = len(trades_history)
-            
-            total_cost = sum(t['cost'] for t in trades_history)
-            trading_state['total_exposure'] = total_cost
             
             trading_state['status'] = 'RUNNING'
-            save_json('quant_state.json', trading_state)
             
-            print(f"Cycle {trading_state['cycle']}: Found {len(new_trades)} trades, scanned {len(liquid)} markets")
+            print(f"Cycle {trading_state['cycle']}: {len(open_trades)} open, {len(trading_state.get('resolved_trades', []))} resolved, {len(new_trades)} new")
             
         except Exception as e:
             trading_state['status'] = f'ERROR: {str(e)[:30]}'
@@ -374,7 +446,7 @@ threading.Thread(target=run_trading, daemon=True).start()
 BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
 <html>
 <head>
-    <title>POLYMARKET QUANT &lt;GO&gt;</title>
+    <title>POLYMARKET QUANT <GO></title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
@@ -389,11 +461,8 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
             --bb-panel: #0d0d0d;
             --bb-border: #1a1a1a;
             --bb-text: #ff9900;
-            --bb-text-dim: #664400;
             --positive: #00ff00;
             --negative: #ff0000;
-            --bid-green: #003300;
-            --ask-red: #330000;
         }
         
         body {
@@ -402,10 +471,9 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
             font-family: 'JetBrains Mono', monospace;
             font-size: 11px;
             min-height: 100vh;
-            overflow: hidden;
+            overflow-x: hidden;
         }
         
-        /* Header */
         .header {
             background: linear-gradient(180deg, #111 0%, #0a0a0a 100%);
             border-bottom: 2px solid #ff6600;
@@ -417,13 +485,7 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
         
         .header-left { display: flex; align-items: center; gap: 20px; }
         
-        .logo {
-            font-size: 14px;
-            font-weight: 700;
-            letter-spacing: 2px;
-            color: #ff9900;
-        }
-        
+        .logo { font-size: 14px; font-weight: 700; letter-spacing: 2px; color: #ff9900; }
         .logo span { color: #ff6600; }
         
         .fn-keys { display: flex; gap: 4px; }
@@ -431,7 +493,7 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
         .fn-key {
             background: #1a1a1a;
             border: 1px solid #333;
-            padding: 3px 8px;
+            padding: 3px 10px;
             font-size: 10px;
             cursor: pointer;
             transition: all 0.1s;
@@ -444,14 +506,31 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
         }
         
         .header-right { display: flex; gap: 25px; align-items: center; font-size: 11px; }
-        
         .header-item { display: flex; align-items: center; gap: 6px; }
-        
         .header-label { color: #555; }
         .header-value { color: #ff9900; font-weight: 600; }
         .header-value.green { color: #00ff00; }
         
-        /* Main Grid */
+        .ticker {
+            background: #0a0a0a;
+            border-bottom: 1px solid #1a1a1a;
+            padding: 3px 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 10px;
+        }
+        
+        .ticker-label {
+            background: #ff6600;
+            color: #000;
+            padding: 1px 6px;
+            font-weight: 700;
+            font-size: 9px;
+        }
+        
+        .ticker-content { color: #666; white-space: nowrap; overflow: hidden; }
+        
         .main-grid {
             display: grid;
             grid-template-columns: 1fr 1.2fr 1fr;
@@ -476,36 +555,14 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
             display: flex;
             justify-content: space-between;
             align-items: center;
-            flex-shrink: 0;
         }
         
-        .panel-title {
-            font-size: 10px;
-            font-weight: 600;
-            color: #ff6600;
-            letter-spacing: 1px;
-        }
+        .panel-title { font-size: 10px; font-weight: 600; color: #ff6600; letter-spacing: 1px; }
+        .panel-badge { background: #1a1100; color: #ff6600; padding: 2px 6px; font-size: 9px; border: 1px solid #332200; }
         
-        .panel-badge {
-            background: #1a1100;
-            color: #ff6600;
-            padding: 2px 6px;
-            font-size: 9px;
-            border: 1px solid #332200;
-        }
+        .panel-body { padding: 8px; overflow-y: auto; flex: 1; }
         
-        .panel-body {
-            padding: 8px;
-            overflow-y: auto;
-            flex: 1;
-        }
-        
-        /* Heatmap */
-        .heatmap {
-            display: grid;
-            grid-template-columns: repeat(10, 1fr);
-            gap: 2px;
-        }
+        .heatmap { display: grid; grid-template-columns: repeat(10, 1fr); gap: 2px; }
         
         .heat-cell {
             aspect-ratio: 1;
@@ -519,181 +576,76 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
             position: relative;
         }
         
-        .heat-cell:hover {
-            transform: scale(1.1);
-            z-index: 10;
-        }
-        
+        .heat-cell:hover { transform: scale(1.1); z-index: 10; }
         .heat-cell .price { font-weight: 700; }
         .heat-cell .vol { font-size: 7px; opacity: 0.7; }
         
-        .heat-cell .tooltip {
-            display: none;
-            position: absolute;
-            bottom: 100%;
-            left: 50%;
-            transform: translateX(-50%);
-            background: #000;
-            border: 1px solid #ff6600;
-            padding: 5px 8px;
-            font-size: 9px;
-            white-space: nowrap;
-            z-index: 100;
-            color: #ff9900;
-        }
-        
-        .heat-cell:hover .tooltip { display: block; }
-        
-        /* Order Book */
-        .ob-container { display: flex; flex-direction: column; gap: 4px; }
-        
-        .ob-header {
-            display: flex;
-            justify-content: space-between;
-            font-size: 9px;
-            color: #555;
-            padding: 0 4px;
-        }
-        
-        .ob-row {
-            display: flex;
-            align-items: center;
-            height: 18px;
-            font-size: 10px;
-            position: relative;
-        }
-        
-        .ob-bar {
-            position: absolute;
-            height: 100%;
-            opacity: 0.3;
-        }
-        
-        .ob-bar.bid { background: #00ff00; right: 50%; }
-        .ob-bar.ask { background: #ff0000; left: 50%; }
-        
-        .ob-price { width: 60px; text-align: center; z-index: 1; }
-        .ob-price.bid { color: #00ff00; }
-        .ob-price.ask { color: #ff0000; }
-        
-        .ob-size { width: 60px; text-align: right; z-index: 1; color: #888; }
-        
-        .ob-spread {
-            text-align: center;
-            font-size: 10px;
-            color: #ff6600;
-            padding: 4px;
-            background: #0d0d0d;
-            margin-top: 4px;
-        }
-        
-        /* Sparklines */
-        .spark-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
-        
-        .spark-item {
-            background: #0d0d0d;
-            border: 1px solid #1a1a1a;
-            padding: 6px;
-        }
-        
-        .spark-header {
-            display: flex;
-            justify-content: space-between;
-            font-size: 9px;
-            margin-bottom: 4px;
-        }
-        
-        .spark-cat { color: #555; }
-        .spark-price { color: #ff9900; font-weight: 600; }
-        
-        .spark-change { font-size: 9px; }
-        .spark-change.up { color: #00ff00; }
-        .spark-change.down { color: #ff0000; }
-        
-        .spark-chart { height: 30px; }
-        
-        /* Trades */
         .trade-card {
             background: linear-gradient(135deg, #0d0d0d 0%, #0a0a0a 100%);
             border: 1px solid #1a1a1a;
             border-left: 3px solid #ff6600;
-            margin-bottom: 6px;
-            padding: 6px 8px;
+            margin-bottom: 8px;
+            padding: 8px 10px;
         }
         
-        .trade-card.sell { border-left-color: #ff0000; }
+        .trade-card.won { border-left-color: #00ff00; }
+        .trade-card.lost { border-left-color: #ff0000; }
+        .trade-card.pending { border-left-color: #ffcc00; }
         
-        .trade-card.new {
-            animation: flash 0.5s;
-        }
-        
-        @keyframes flash {
-            0% { background: #1a1a00; }
-            100% { background: #0d0d0d; }
-        }
-        
-        .trade-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 2px;
-        }
-        
-        .trade-action {
+        .trade-status {
+            display: inline-block;
+            padding: 2px 8px;
+            font-size: 9px;
             font-weight: 700;
-            font-size: 10px;
+            margin-bottom: 4px;
         }
         
+        .trade-status.won { background: #003300; color: #00ff00; }
+        .trade-status.lost { background: #330000; color: #ff0000; }
+        .trade-status.pending { background: #332200; color: #ffcc00; }
+        
+        .trade-question { color: #888; font-size: 10px; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        
+        .trade-row { display: flex; justify-content: space-between; margin-bottom: 3px; }
+        .trade-action { font-weight: 700; font-size: 10px; }
         .trade-action.buy { color: #00ff00; }
         .trade-action.sell { color: #ff0000; }
+        .trade-meta { color: #555; font-size: 9px; }
         
-        .trade-cat { font-size: 8px; color: #555; }
-        
-        .trade-question {
-            color: #777;
-            font-size: 9px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            margin-bottom: 3px;
-        }
-        
-        .trade-stats {
+        .trade-details {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
             gap: 4px;
-            font-size: 8px;
+            padding-top: 4px;
+            border-top: 1px solid #222;
+            font-size: 9px;
         }
         
         .trade-stat { text-align: center; }
-        .trade-stat-label { color: #444; }
+        .trade-stat-label { color: #444; font-size: 8px; }
         .trade-stat-val { color: #ff9900; font-weight: 600; }
+        .trade-stat-val.green { color: #00ff00; }
+        .trade-stat-val.red { color: #ff0000; }
         
-        /* Portfolio */
-        .portfolio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-        
-        .port-card {
+        .trade-pnl {
+            margin-top: 4px;
+            padding: 4px;
             background: #0d0d0d;
-            border: 1px solid #1a1a1a;
-            padding: 10px;
+            border-radius: 3px;
             text-align: center;
+            font-size: 10px;
+            font-weight: 600;
         }
         
-        .port-value {
-            font-size: 16px;
-            font-weight: 700;
-            color: #ff9900;
-        }
+        .trade-pnl.positive { color: #00ff00; background: #001a00; }
+        .trade-pnl.negative { color: #ff0000; background: #1a0000; }
         
-        .port-value.green { color: #00ff00; }
-        .port-value.red { color: #ff0000; }
-        
-        .port-label {
+        .trade-countdown {
             font-size: 9px;
-            color: #555;
-            margin-top: 3px;
+            color: #ff6600;
+            margin-top: 4px;
         }
         
-        /* Analytics */
         .analytics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
         
         .an-card {
@@ -705,34 +657,20 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
         
         .an-value { font-size: 18px; font-weight: 700; color: #ff6600; }
         .an-value.pos { color: #00ff00; }
+        .an-value.neg { color: #ff0000; }
         .an-label { font-size: 9px; color: #555; margin-top: 2px; }
         
         .sector-list { margin-top: 8px; }
         
         .sector-item { margin-bottom: 6px; }
         
-        .sector-hdr {
-            display: flex;
-            justify-content: space-between;
-            font-size: 9px;
-            margin-bottom: 2px;
-        }
-        
+        .sector-hdr { display: flex; justify-content: space-between; font-size: 9px; margin-bottom: 2px; }
         .sector-name { color: #666; }
         .sector-vol { color: #ff9900; }
         
-        .sector-bar {
-            height: 8px;
-            background: #111;
-            border: 1px solid #1a1a1a;
-        }
+        .sector-bar { height: 8px; background: #111; border: 1px solid #1a1a1a; }
+        .sector-fill { height: 100%; background: linear-gradient(90deg, #ff6600, #ff9900); }
         
-        .sector-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #ff6600, #ff9900);
-        }
-        
-        /* AI Insights */
         .ai-list { margin-top: 8px; }
         
         .ai-item {
@@ -746,16 +684,26 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
         }
         
         .ai-icon { font-size: 12px; }
-        
-        .ai-type {
-            font-size: 9px;
-            font-weight: 600;
-            color: #ff6600;
-        }
-        
+        .ai-type { font-size: 9px; font-weight: 600; color: #ff6600; }
         .ai-msg { font-size: 9px; color: #777; }
         
-        /* Footer */
+        .portfolio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        
+        .port-card {
+            background: #0d0d0d;
+            border: 1px solid #1a1a1a;
+            padding: 10px;
+            text-align: center;
+        }
+        
+        .port-value { font-size: 16px; font-weight: 700; color: #ff9900; }
+        .port-value.green { color: #00ff00; }
+        .port-value.red { color: #ff0000; }
+        .port-label { font-size: 9px; color: #555; margin-top: 3px; }
+        
+        .system-stats { font-size: 10px; color: #555; display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+        .system-stats div { display: flex; justify-content: space-between; }
+        
         .footer {
             background: #050505;
             border-top: 1px solid #1a1a1a;
@@ -766,63 +714,51 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
             color: #555;
         }
         
-        .cmdline {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        
+        .cmdline { display: flex; align-items: center; gap: 8px; }
         .cmd-prompt { color: #ff6600; font-weight: 700; }
-        
-        .cmd-input {
-            background: transparent;
-            border: none;
-            color: #ff9900;
-            font-family: inherit;
-            font-size: 11px;
-            outline: none;
-            width: 200px;
-        }
+        .cmd-input { background: transparent; border: none; color: #ff9900; font-family: inherit; font-size: 11px; outline: none; width: 200px; }
         
         .status-item { display: flex; align-items: center; gap: 5px; }
-        
-        .status-dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-        }
-        
+        .status-dot { width: 6px; height: 6px; border-radius: 50%; }
         .status-dot.green { background: #00ff00; }
         .status-dot.red { background: #ff0000; }
-        
-        /* Ticker */
-        .ticker {
-            background: #0a0a0a;
-            border-bottom: 1px solid #1a1a1a;
-            padding: 3px 12px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 10px;
-        }
-        
-        .ticker-label {
-            background: #ff6600;
-            color: #000;
-            padding: 1px 6px;
-            font-weight: 700;
-            font-size: 9px;
-        }
-        
-        .ticker-content {
-            color: #666;
-            white-space: nowrap;
-            overflow: hidden;
-        }
         
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: #0a0a0a; }
         ::-webkit-scrollbar-thumb { background: #333; }
+        
+        .history-summary {
+            background: #0d0d0d;
+            border: 1px solid #1a1a1a;
+            padding: 12px;
+            margin-bottom: 15px;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            text-align: center;
+        }
+        
+        .history-stat { }
+        .history-stat-value { font-size: 20px; font-weight: 700; }
+        .history-stat-label { font-size: 9px; color: #555; margin-top: 2px; }
+        
+        .resolved-card {
+            background: #0d0d0d;
+            border: 1px solid #1a1a1a;
+            margin-bottom: 8px;
+            padding: 8px 10px;
+            border-left: 3px solid #ff6600;
+        }
+        
+        .resolved-card.won { border-left-color: #00ff00; }
+        .resolved-card.lost { border-left-color: #ff0000; }
+        
+        .resolved-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+        .resolved-question { color: #888; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+        .resolved-profit { font-size: 14px; font-weight: 700; }
+        .resolved-profit.positive { color: #00ff00; }
+        .resolved-profit.negative { color: #ff0000; }
+        .resolved-date { font-size: 9px; color: #555; }
     </style>
 </head>
 <body>
@@ -830,149 +766,92 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
         <div class="header-left">
             <div class="logo">POLYMARKET <span>QUANT</span></div>
             <div class="fn-keys">
-                <div class="fn-key active" data-view="all">[F1] ALL</div>
-                <div class="fn-key" data-view="mkt">[F2] MKT</div>
-                <div class="fn-key" data-view="trades">[F3] TRADES</div>
-                <div class="fn-key" data-view="risk">[F4] RISK</div>
+                <div class="fn-key active" onclick="switchView('active')">[F1] ACTIVE</div>
+                <div class="fn-key" onclick="switchView('history')">[F2] HISTORY</div>
             </div>
         </div>
         <div class="header-right">
-            <div class="header-item">
-                <span class="header-label">CYCLE</span>
-                <span class="header-value" id="cycle">0</span>
-            </div>
-            <div class="header-item">
-                <span class="header-label">PORTFOLIO</span>
-                <span class="header-value green" id="portfolio">$0</span>
-            </div>
-            <div class="header-item">
-                <span class="header-label">STATUS</span>
-                <span class="header-value" id="status">INIT</span>
-            </div>
-            <div class="header-item">
-                <span class="header-value" id="clock">00:00:00</span>
-            </div>
+            <div class="header-item"><span class="header-label">CYCLE</span><span class="header-value" id="cycle">0</span></div>
+            <div class="header-item"><span class="header-label">PORTFOLIO</span><span class="header-value green" id="portfolio">$0</span></div>
+            <div class="header-item"><span class="header-label">STATUS</span><span class="header-value" id="status">INIT</span></div>
+            <div class="header-item"><span class="header-value" id="clock">00:00:00</span></div>
         </div>
     </div>
     
     <div class="ticker">
         <span class="ticker-label">NEWS</span>
-        <div class="ticker-content" id="ticker">
-            QUANT ENGINE ACTIVE | PAPER TRADING MODE | SCANNING POLYMARKET MARKETS | 1.5S REFRESH RATE
-        </div>
+        <div class="ticker-content" id="ticker">QUANT ENGINE ACTIVE | PAPER TRADING | REAL-TIME DATA | TRADE TRACKING ENABLED</div>
     </div>
     
-    <div class="main-grid">
-        <!-- Panel 1: Heatmap -->
+    <div class="main-grid" id="activeView">
         <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">MARKET HEATMAP</span>
-                <span class="panel-badge" id="heatCount">0</span>
-            </div>
-            <div class="panel-body">
-                <div class="heatmap" id="heatmap"></div>
-            </div>
+            <div class="panel-header"><span class="panel-title">MARKET HEATMAP</span><span class="panel-badge" id="heatCount">0</span></div>
+            <div class="panel-body"><div class="heatmap" id="heatmap"></div></div>
         </div>
         
-        <!-- Panel 2: Trades -->
         <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">ACTIVE POSITIONS</span>
-                <span class="panel-badge" id="tradeCount">0</span>
-            </div>
+            <div class="panel-header"><span class="panel-title">OPEN POSITIONS</span><span class="panel-badge" id="tradeCount">0</span></div>
             <div class="panel-body" id="tradesList"></div>
         </div>
         
-        <!-- Panel 3: Analytics -->
         <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">ANALYTICS</span>
-                <span class="panel-badge">REAL-TIME</span>
-            </div>
+            <div class="panel-header"><span class="panel-title">ANALYTICS</span><span class="panel-badge">REAL-TIME</span></div>
             <div class="panel-body">
                 <div class="analytics-grid">
-                    <div class="an-card">
-                        <div class="an-value" id="totalTrades">0</div>
-                        <div class="an-label">TRADES</div>
-                    </div>
-                    <div class="an-card">
-                        <div class="an-value pos" id="winRate">0%</div>
-                        <div class="an-label">WIN RATE</div>
-                    </div>
-                    <div class="an-card">
-                        <div class="an-value" id="avgEdge">0%</div>
-                        <div class="an-label">AVG EDGE</div>
-                    </div>
-                    <div class="an-card">
-                        <div class="an-value" id="maxEdge">0%</div>
-                        <div class="an-label">MAX EDGE</div>
-                    </div>
+                    <div class="an-card"><div class="an-value" id="totalTrades">0</div><div class="an-label">TOTAL TRADES</div></div>
+                    <div class="an-card"><div class="an-value pos" id="winRate">0%</div><div class="an-label">WIN RATE</div></div>
+                    <div class="an-card"><div class="an-value" id="avgEdge">0%</div><div class="an-label">AVG EDGE</div></div>
+                    <div class="an-card"><div class="an-value" id="maxEdge">0%</div><div class="an-label">MAX EDGE</div></div>
                 </div>
-                
                 <div class="panel-title" style="margin-bottom:6px;">SECTORS</div>
                 <div class="sector-list" id="sectors"></div>
-                
                 <div class="panel-title" style="margin:10px 0 6px;">AI INSIGHTS</div>
                 <div class="ai-list" id="aiInsights"></div>
             </div>
         </div>
         
-        <!-- Panel 4: Order Book -->
         <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">ORDER BOOK</span>
-                <span class="panel-badge" id="obMarket">-</span>
-            </div>
-            <div class="panel-body">
-                <div class="ob-container" id="orderBook"></div>
-            </div>
+            <div class="panel-header"><span class="panel-title">ORDER BOOK</span><span class="panel-badge" id="obMarket">-</span></div>
+            <div class="panel-body" id="orderBook"></div>
         </div>
         
-        <!-- Panel 5: Sparklines -->
         <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">SPARKLINES</span>
-                <span class="panel-badge">LIVE</span>
-            </div>
-            <div class="panel-body">
-                <div class="spark-grid" id="sparklines"></div>
-            </div>
+            <div class="panel-header"><span class="panel-title">SPARKLINES</span><span class="panel-badge">LIVE</span></div>
+            <div class="panel-body" id="sparklines"></div>
         </div>
         
-        <!-- Panel 6: Portfolio -->
         <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">PORTFOLIO</span>
-                <span class="panel-badge">PAPER</span>
-            </div>
+            <div class="panel-header"><span class="panel-title">PORTFOLIO</span><span class="panel-badge">PAPER</span></div>
             <div class="panel-body">
                 <div class="portfolio-grid">
-                    <div class="port-card">
-                        <div class="port-value" id="totalCost">$0</div>
-                        <div class="port-label">TOTAL EXPOSURE</div>
-                    </div>
-                    <div class="port-card">
-                        <div class="port-value" id="avgSize">$0</div>
-                        <div class="port-label">AVG POSITION</div>
-                    </div>
-                    <div class="port-card">
-                        <div class="port-value" id="maxPos">$0</div>
-                        <div class="port-label">LARGEST</div>
-                    </div>
-                    <div class="port-card">
-                        <div class="port-value" id="cashRem">$0</div>
-                        <div class="port-label">CASH</div>
-                    </div>
+                    <div class="port-card"><div class="port-value" id="totalCost">$0</div><div class="port-label">EXPOSURE</div></div>
+                    <div class="port-card"><div class="port-value" id="avgSize">$0</div><div class="port-label">AVG POSITION</div></div>
+                    <div class="port-card"><div class="port-value" id="maxPos">$0</div><div class="port-label">LARGEST</div></div>
+                    <div class="port-card"><div class="port-value" id="cashRem">$0</div><div class="port-label">CASH</div></div>
                 </div>
-                
-                <div class="panel-title" style="margin:12px 0 6px;">SYSTEM</div>
-                <div style="font-size:10px; color:#555; display:flex; flex-direction:column; gap:4px;">
-                    <div style="display:flex; justify-content:space-between;"><span>MARKETS</span><span id="sysMarkets" style="color:#ff9900;">0</span></div>
-                    <div style="display:flex; justify-content:space-between;"><span>VOLUME</span><span id="sysVolume" style="color:#ff9900;">$0</span></div>
-                    <div style="display:flex; justify-content:space-between;"><span>API ERR</span><span id="sysErrors" style="color:#ff0000;">0</span></div>
-                    <div style="display:flex; justify-content:space-between;"><span>UPTIME</span><span id="sysUptime" style="color:#ff9900;">0h</span></div>
-                    <div style="display:flex; justify-content:space-between;"><span>LAST</span><span id="sysLast" style="color:#ff9900;">-</span></div>
+                <div class="system-stats">
+                    <div><span>MARKETS</span><span id="sysMarkets" style="color:#ff9900;">0</span></div>
+                    <div><span>VOLUME</span><span id="sysVolume" style="color:#ff9900;">$0</span></div>
+                    <div><span>API ERR</span><span id="sysErrors" style="color:#ff0000;">0</span></div>
+                    <div><span>UPTIME</span><span id="sysUptime" style="color:#ff9900;">0h</span></div>
+                    <div><span>WINS</span><span id="sysWins" style="color:#00ff00;">0</span></div>
+                    <div><span>LOSSES</span><span id="sysLosses" style="color:#ff0000;">0</span></div>
                 </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="main-grid" id="historyView" style="display:none;">
+        <div class="panel" style="grid-column:1/-1;">
+            <div class="panel-header"><span class="panel-title">TRADE HISTORY</span><span class="panel-badge" id="historyCount">0</span></div>
+            <div class="panel-body">
+                <div class="history-summary">
+                    <div class="history-stat"><div class="history-stat-value" id="histTotal">0</div><div class="history-stat-label">TOTAL TRADES</div></div>
+                    <div class="history-stat"><div class="history-stat-value" style="color:#00ff00;" id="histWins">0</div><div class="history-stat-label">WINS</div></div>
+                    <div class="history-stat"><div class="history-stat-value" style="color:#ff0000;" id="histLosses">0</div><div class="history-stat-label">LOSSES</div></div>
+                    <div class="history-stat"><div class="history-stat-value" id="histPnl">$0</div><div class="history-stat-label">NET P&L</div></div>
+                </div>
+                <div id="historyList"></div>
             </div>
         </div>
     </div>
@@ -986,12 +865,20 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
             <div class="status-dot green" id="statusDot"></div>
             <span id="statusText">CONNECTED</span>
         </div>
-        <div class="status-item">
-            <span>RENDER.COM CLOUD</span>
-        </div>
+        <div class="status-item"><span>RENDER.COM CLOUD</span></div>
     </div>
     
     <script>
+        let currentView = 'active';
+        
+        function switchView(view) {
+            currentView = view;
+            document.querySelectorAll('.fn-key').forEach(k => k.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('activeView').style.display = view === 'active' ? 'grid' : 'none';
+            document.getElementById('historyView').style.display = view === 'history' ? 'grid' : 'none';
+        }
+        
         function formatNum(n) {
             if(n >= 1e9) return (n/1e9).toFixed(1) + 'B';
             if(n >= 1e6) return (n/1e6).toFixed(1) + 'M';
@@ -1001,7 +888,7 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
         
         function formatTime(iso) {
             if(!iso) return '-';
-            return new Date(iso).toLocaleTimeString();
+            return new Date(iso).toLocaleDateString();
         }
         
         function formatUptime(iso) {
@@ -1011,15 +898,21 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
             return Math.round(hrs) + 'h';
         }
         
-        function priceColor(change) {
-            if(change > 0) return '#00ff00';
-            if(change < 0) return '#ff0000';
-            return '#666666';
-        }
-        
-        function catColor(cat) {
-            const colors = { 'Sports': '#4a9eff', 'Crypto': '#ff9900', 'Politics': '#ff4a4a', 'Business': '#4aff4a', 'Tech': '#ff4aff', 'Entertainment': '#4a9eff' };
-            return colors[cat] || '#888888';
+        function calculatePnL(trade) {
+            if (!trade.current_price) return { pnl: 0, pnlPercent: 0 };
+            const entry = trade.entry_price || trade.price;
+            const current = trade.current_price;
+            const size = trade.size || 0;
+            
+            if (trade.action.includes('BUY')) {
+                const pnl = (current - entry) * size * 10;
+                const pnlPercent = ((current - entry) / entry) * 100;
+                return { pnl, pnlPercent };
+            } else {
+                const pnl = (entry - current) * size * 10;
+                const pnlPercent = ((entry - current) / entry) * 100;
+                return { pnl, pnlPercent };
+            }
         }
         
         function createSparkline(data) {
@@ -1040,148 +933,127 @@ BLOOMBERG_DASHBOARD = '''<!DOCTYPE html>
             try {
                 const s = await fetch('/api/status').then(r=>r.json());
                 const t = await fetch('/api/trades').then(r=>r.json());
+                const h = await fetch('/api/history').then(r=>r.json());
                 const m = await fetch('/api/markets').then(r=>r.json());
-                const ob = await fetch('/api/orderbook').then(r=>r.json());
-                const hist = await fetch('/api/sparkline').then(r=>r.json());
                 
-                // Header
                 document.getElementById('clock').textContent = new Date().toLocaleTimeString();
                 document.getElementById('cycle').textContent = s.cycle;
                 document.getElementById('portfolio').textContent = '$' + s.portfolio.toFixed(0);
                 document.getElementById('status').textContent = s.status;
                 
-                // Heatmap
+                // Markets Heatmap
                 const markets = m.markets || [];
                 document.getElementById('heatCount').textContent = markets.length;
                 const maxVol = Math.max(...markets.map(m=>m.volume), 1);
-                const heatmapHtml = markets.slice(0, 50).map(x => {
+                document.getElementById('heatmap').innerHTML = markets.slice(0, 50).map(x => {
                     const chg = x.oneDayChange || 0;
                     const intensity = Math.min(Math.abs(chg) * 10, 1);
                     const r = chg > 0 ? 0 : Math.floor(255 * intensity);
                     const g = chg < 0 ? 0 : Math.floor(255 * intensity);
-                    const b = 0;
-                    const bg = chg === 0 ? '#1a1a1a' : 'rgb(' + r + ',' + g + ',' + b + ')';
-                    const size = 0.3 + (x.volume / maxVol) * 0.7;
-                    return '<div class="heat-cell" style="background:' + bg + ';font-size:' + (8 + size * 4) + 'px;"><span class="price">' + (x.price*100).toFixed(0) + '</span><span class="vol">' + formatNum(x.volume).replace('M','M').replace('K','K') + '</span><div class="tooltip">' + x.category + ' | ' + (x.price*100).toFixed(1) + '% | ' + formatNum(x.volume) + '</div></div>';
+                    const bg = chg === 0 ? '#1a1a1a' : 'rgb(' + r + ',' + g + ',0)';
+                    return '<div class="heat-cell" style="background:' + bg + ';font-size:' + (8 + (x.volume/maxVol)*4) + 'px;"><span class="price">' + (x.price*100).toFixed(0) + '</span><span class="vol">' + formatNum(x.volume) + '</span></div>';
                 }).join('');
-                document.getElementById('heatmap').innerHTML = heatmapHtml;
                 
-                // Trades
+                // Trades - Open Positions
                 const trades = t.trades || [];
                 document.getElementById('tradeCount').textContent = trades.length;
-                const tradesHtml = trades.slice(0, 10).map((x, i) => {
-                    const isSell = x.action.includes('SELL');
-                    return '<div class="trade-card ' + (isSell ? 'sell' : '') + '"><div class="trade-header"><span class="trade-action ' + (isSell ? 'sell' : 'buy') + '">' + x.action + '</span><span class="trade-cat">' + x.category + '</span></div><div class="trade-question">' + x.question + '</div><div class="trade-stats"><div class="trade-stat"><div class="trade-stat-val">$' + x.size.toFixed(2) + '</div><div class="trade-stat-label">SIZE</div></div><div class="trade-stat"><div class="trade-stat-val">' + (x.price*100).toFixed(1) + '%</div><div class="trade-stat-label">PRICE</div></div><div class="trade-stat"><div class="trade-stat-val">' + (x.edge*100).toFixed(1) + '%</div><div class="trade-stat-label">EDGE</div></div><div class="trade-stat"><div class="trade-stat-val">' + (x.prob_estimate*100).toFixed(0) + '%</div><div class="trade-stat-label">AI</div></div></div></div>';
-                }).join('');
-                document.getElementById('tradesList').innerHTML = tradesHtml || '<div style="color:#333;text-align:center;padding:20px;">NO POSITIONS</div>';
+                document.getElementById('tradesList').innerHTML = trades.length ? trades.map(x => {
+                    const isBuy = x.action.includes('BUY');
+                    const pnl = calculatePnL(x);
+                    const pnlClass = pnl.pnl >= 0 ? 'positive' : 'negative';
+                    const days = x.days_to_resolve !== undefined && x.days_to_resolve !== null ? x.days_to_resolve + ' days' : 'TBD';
+                    
+                    return '<div class="trade-card ' + (x.status || 'pending') + '">' +
+                        '<span class="trade-status ' + (x.status || 'pending') + '">' + (x.result || 'PENDING') + '</span>' +
+                        '<div class="trade-question">' + x.question + '</div>' +
+                        '<div class="trade-row"><span class="trade-action ' + (isBuy ? 'buy' : 'sell') + '">' + x.action + '</span><span class="trade-meta">$' + x.size.toFixed(2) + ' @ ' + (x.price*100).toFixed(1) + '%</span></div>' +
+                        '<div class="trade-details">' +
+                        '<div class="trade-stat"><div class="trade-stat-val">' + (x.edge*100).toFixed(1) + '%</div><div class="trade-stat-label">EDGE</div></div>' +
+                        '<div class="trade-stat"><div class="trade-stat-val">' + (x.prob_estimate*100).toFixed(0) + '%</div><div class="trade-stat-label">AI</div></div>' +
+                        '<div class="trade-stat"><div class="trade-stat-val">' + ((x.current_price || x.price)*100).toFixed(1) + '%</div><div class="trade-stat-label">NOW</div></div>' +
+                        '<div class="trade-stat"><div class="trade-stat-val">' + days + '</div><div class="trade-stat-label">RESOLVE</div></div>' +
+                        '</div>' +
+                        '<div class="trade-pnl ' + pnlClass + '">P&L: ' + (pnl.pnl >= 0 ? '+' : '') + '$' + pnl.pnl.toFixed(2) + ' (' + (pnl.pnlPercent >= 0 ? '+' : '') + pnl.pnlPercent.toFixed(1) + '%)</div>' +
+                        '</div>';
+                }).join('') : '<div style="color:#333;text-align:center;padding:20px;">NO OPEN POSITIONS</div>';
                 
                 // Analytics
                 document.getElementById('totalTrades').textContent = s.trades_executed;
                 const winRate = (s.wins + s.losses) > 0 ? (s.wins / (s.wins + s.losses) * 100) : 0;
                 document.getElementById('winRate').textContent = winRate.toFixed(0) + '%';
                 const edges = trades.map(x => x.edge);
-                const avgEdge = edges.length ? (edges.reduce((a,b)=>a+b,0) / edges.length * 100).toFixed(1) : 0;
-                const maxEdge = edges.length ? (Math.max(...edges) * 100).toFixed(1) : 0;
-                document.getElementById('avgEdge').textContent = avgEdge + '%';
-                document.getElementById('maxEdge').textContent = maxEdge + '%';
+                document.getElementById('avgEdge').textContent = edges.length ? (edges.reduce((a,b)=>a+b,0)/edges.length*100).toFixed(1) + '%' : '0%';
+                document.getElementById('maxEdge').textContent = edges.length ? (Math.max(...edges)*100).toFixed(1) + '%' : '0%';
                 
                 // Sectors
                 const sectors = m.market_insights || [];
                 const totalVol = sectors.reduce((a,b)=>a+b.volume,0);
-                const sectorHtml = sectors.slice(0,6).map(x => {
-                    const pct = totalVol ? (x.volume / totalVol * 100) : 0;
+                document.getElementById('sectors').innerHTML = sectors.slice(0,6).map(x => {
+                    const pct = totalVol ? (x.volume/totalVol*100) : 0;
                     return '<div class="sector-item"><div class="sector-hdr"><span class="sector-name">' + x.category + '</span><span class="sector-vol">' + formatNum(x.volume) + '</span></div><div class="sector-bar"><div class="sector-fill" style="width:' + pct + '%"></div></div></div>';
                 }).join('');
-                document.getElementById('sectors').innerHTML = sectorHtml || '<div style="color:#333;">NO DATA</div>';
                 
                 // AI Insights
                 const insights = s.ai_insights || [];
-                const aiHtml = insights.map(x => {
-                    const icon = x.type === 'HOT' ? '&#128293;' : x.type === 'EDGE' ? '&#128200;' : x.type === 'BIAS' ? '&#9878;' : '&#129302;';
+                document.getElementById('aiInsights').innerHTML = insights.map(x => {
+                    const icon = x.type === 'HOT' ? '&#128293;' : '&#129302;';
                     return '<div class="ai-item"><span class="ai-icon">' + icon + '</span><div><div class="ai-type">' + x.type + '</div><div class="ai-msg">' + x.message + '</div></div></div>';
-                }).join('');
-                document.getElementById('aiInsights').innerHTML = aiHtml || '<div style="color:#333;font-size:9px;">ANALYZING...</div>';
-                
-                // Order Book
-                const orderbook = ob.order_book || { bids: [], asks: [], market: '-' };
-                document.getElementById('obMarket').textContent = orderbook.market || '-';
-                const maxSize = Math.max(
-                    ...orderbook.bids.map(b=>b.size),
-                    ...orderbook.asks.map(a=>a.size),
-                    1
-                );
-                let obHtml = '<div class="ob-header"><span>SIZE</span><span>PRICE</span><span>SIZE</span></div>';
-                
-                orderbook.bids.slice(0, 5).reverse().forEach(b => {
-                    const barW = (b.size / maxSize) * 50;
-                    obHtml += '<div class="ob-row"><div class="ob-size">' + b.size.toFixed(0) + '</div><div class="ob-bar bid" style="width:' + barW + '%;right:' + (50 - barW/2) + '%;"></div><div class="ob-price bid">' + (b.price*100).toFixed(1) + '%</div></div>';
-                });
-                
-                obHtml += '<div class="ob-spread">SPREAD: ' + (orderbook.bids[0] && orderbook.asks[0] ? ((orderbook.asks[0].price - orderbook.bids[0].price) * 100).toFixed(2) : 0) + '%</div>';
-                
-                orderbook.asks.slice(0, 5).forEach(a => {
-                    const barW = (a.size / maxSize) * 50;
-                    obHtml += '<div class="ob-row"><div class="ob-size">' + a.size.toFixed(0) + '</div><div class="ob-bar ask" style="width:' + barW + '%;left:' + (50 - barW/2) + '%;"></div><div class="ob-price ask">' + (a.price*100).toFixed(1) + '%</div></div>';
-                });
-                
-                document.getElementById('orderBook').innerHTML = obHtml;
-                
-                // Sparklines
-                const sparkData = hist.sparklines || [];
-                const sparkHtml = sparkData.slice(0, 10).map(x => {
-                    const chg = x.change || 0;
-                    return '<div class="spark-item"><div class="spark-header"><span class="spark-cat">' + x.category + '</span><span class="spark-price">' + (x.price*100).toFixed(1) + '%</span></div><div class="spark-chart">' + createSparkline(x.sparkline) + '</div><div class="spark-change ' + (chg >= 0 ? 'up' : 'down') + '">' + (chg >= 0 ? '+' : '') + (chg*100).toFixed(1) + '%</div></div>';
-                }).join('');
-                document.getElementById('sparklines').innerHTML = sparkHtml || '<div style="color:#333;">NO DATA</div>';
+                }).join('') || '<div style="color:#333;font-size:9px;">ANALYZING...</div>';
                 
                 // Portfolio
-                const totalCost = trades.reduce((a,b)=>a+b.cost,0);
-                const avgSize = trades.length ? totalCost / trades.length : 0;
-                const maxPos = trades.length ? Math.max(...trades.map(t=>t.size)) : 0;
-                const cash = s.portfolio - totalCost;
-                
+                const totalCost = trades.reduce((a,b)=>a+(b.cost||0),0);
+                const avgSize = trades.length ? totalCost/trades.length : 0;
+                const maxPos = trades.length ? Math.max(...trades.map(t=>t.size||0)) : 0;
                 document.getElementById('totalCost').textContent = '$' + totalCost.toFixed(2);
                 document.getElementById('avgSize').textContent = '$' + avgSize.toFixed(2);
                 document.getElementById('maxPos').textContent = '$' + maxPos.toFixed(2);
-                document.getElementById('cashRem').textContent = '$' + cash.toFixed(2);
+                document.getElementById('cashRem').textContent = '$' + (s.portfolio - totalCost).toFixed(2);
                 
                 // System
                 document.getElementById('sysMarkets').textContent = s.markets_scanned;
                 document.getElementById('sysVolume').textContent = '$' + formatNum(s.total_volume_scanned);
                 document.getElementById('sysErrors').textContent = s.api_errors;
                 document.getElementById('sysUptime').textContent = formatUptime(s.startup_time);
-                document.getElementById('sysLast').textContent = s.last_trade_time ? formatTime(s.last_trade_time) : '-';
+                document.getElementById('sysWins').textContent = s.wins;
+                document.getElementById('sysLosses').textContent = s.losses;
                 
-                // Status
                 document.getElementById('statusDot').className = 'status-dot ' + (s.status === 'RUNNING' ? 'green' : 'red');
                 document.getElementById('statusText').textContent = s.status === 'RUNNING' ? 'ACTIVE' : 'ERROR';
+                
+                // HISTORY VIEW
+                const history = h.resolved || [];
+                document.getElementById('historyCount').textContent = history.length;
+                document.getElementById('histTotal').textContent = history.length;
+                document.getElementById('histWins').textContent = history.filter(t => t.result === 'WON').length;
+                document.getElementById('histLosses').textContent = history.filter(t => t.result === 'LOST').length;
+                const totalPnl = history.reduce((a,b) => a + (b.profit || 0), 0);
+                document.getElementById('histPnl').textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
+                document.getElementById('histPnl').style.color = totalPnl >= 0 ? '#00ff00' : '#ff0000';
+                
+                document.getElementById('historyList').innerHTML = history.length ? history.slice(0, 50).map(x => {
+                    const profit = x.profit || 0;
+                    return '<div class="resolved-card ' + (x.result || '').toLowerCase() + '">' +
+                        '<div class="resolved-row"><span class="trade-status ' + (x.result||'').toLowerCase() + '">' + (x.result||'PENDING') + '</span><span class="resolved-profit ' + (profit >= 0 ? 'positive' : 'negative') + '">' + (profit >= 0 ? '+' : '') + '$' + profit.toFixed(2) + '</span></div>' +
+                        '<div class="resolved-question">' + (x.question || 'Unknown') + '</div>' +
+                        '<div class="resolved-date">Entry: ' + (x.price*100).toFixed(1) + '% | Resolved: ' + formatTime(x.resolved_at) + '</div>' +
+                        '</div>';
+                }).join('') : '<div style="color:#333;text-align:center;padding:30px;">NO RESOLVED TRADES YET</div>';
                 
             } catch(e) {
                 console.error(e);
             }
         }
         
-        // Command input
         document.getElementById('cmdInput').addEventListener('keypress', function(e) {
             if(e.key === 'Enter') {
                 const cmd = this.value.toUpperCase();
                 if(cmd === 'REFRESH') update();
-                else if(cmd === 'CLEAR') this.value = '';
-                else if(cmd.startsWith('HELP')) alert('Commands: REFRESH, CLEAR');
                 this.value = '';
             }
         });
         
-        // Fn keys
-        document.querySelectorAll('.fn-key').forEach(k => {
-            k.addEventListener('click', function() {
-                document.querySelectorAll('.fn-key').forEach(k => k.classList.remove('active'));
-                this.classList.add('active');
-            });
-        });
-        
         update();
-        setInterval(update, 1500);
+        setInterval(update, 2000);
     </script>
 </body>
 </html>'''
@@ -1192,7 +1064,7 @@ def dashboard():
 
 @app.route('/')
 def index():
-    return '<h1>Polymarket Quant Trader</h1><p><a href="/dashboard">Open Bloomberg Terminal Pro</a></p>'
+    return '<h1>Polymarket Quant Trader</h1><p><a href="/dashboard">Open Bloomberg Terminal</a></p>'
 
 @app.route('/api/status')
 def api_status():
@@ -1200,28 +1072,28 @@ def api_status():
         'mode': 'QUANT ENGINE',
         'cycle': trading_state['cycle'],
         'portfolio': trading_state['portfolio'],
-        'portfolio_start': trading_state.get('portfolio_start', 1000),
         'trades_executed': trading_state['trades_executed'],
         'wins': trading_state['wins'],
         'losses': trading_state['losses'],
         'status': trading_state['status'],
         'last_error': trading_state.get('last_error', ''),
-        'last_update': datetime.now(timezone.utc).isoformat(),
         'startup_time': trading_state.get('startup_time'),
         'markets_scanned': trading_state.get('markets_scanned', 0),
         'api_errors': trading_state.get('api_errors', 0),
-        'last_trade_time': trading_state.get('last_trade_time'),
         'total_volume_scanned': trading_state.get('total_volume_scanned', 0),
         'total_exposure': trading_state.get('total_exposure', 0),
-        'strategy_stats': dict(trading_state.get('strategy_stats', {})),
         'edge_history': trading_state.get('edge_history', []),
         'ai_insights': trading_state.get('ai_insights', []),
-        'sectors': dict(trading_state.get('sectors', {}))
+        'sectors': trading_state.get('sectors', {})
     })
 
 @app.route('/api/trades')
 def api_trades():
-    return jsonify({'trades': trading_state.get('trades', [])[:20]})
+    return jsonify({'trades': trading_state.get('trades', [])})
+
+@app.route('/api/history')
+def api_history():
+    return jsonify({'resolved': trading_state.get('resolved_trades', [])})
 
 @app.route('/api/markets')
 def api_markets():
@@ -1232,7 +1104,7 @@ def api_markets():
 
 @app.route('/api/orderbook')
 def api_orderbook():
-    return jsonify({'order_book': trading_state.get('order_book', {'bids': [], 'asks': [], 'market': '-'})})
+    return jsonify({'order_book': trading_state.get('order_book', {'bids': [], 'asks': []})})
 
 @app.route('/api/sparkline')
 def api_sparkline():
@@ -1256,20 +1128,7 @@ def api_sparkline():
     
     return jsonify({'sparklines': sparklines})
 
-@app.route('/api/ai')
-def api_ai():
-    return jsonify({
-        'insights': trading_state.get('ai_insights', []),
-        'sectors': dict(trading_state.get('sectors', {}))
-    })
-
-@app.route('/api/logs')
-def api_logs():
-    return jsonify({'logs': [
-        {'time': datetime.now(timezone.utc).isoformat(), 'type': 'STATUS', 'message': f"Cycle {trading_state['cycle']} - {trading_state['status']}"}
-    ]})
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print(f"Starting Bloomberg Terminal Pro on port {port}")
+    print(f"Starting Polymarket Bloomberg Terminal v2 on port {port}")
     app.run(host='0.0.0.0', port=port)
