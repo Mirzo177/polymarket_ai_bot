@@ -221,6 +221,193 @@ class AIAnalyzer:
         
         return insights[:5]
 
+class SelfLearningEngine:
+    """AI that learns from past trades to improve future decisions"""
+    
+    def __init__(self):
+        self.performance_data = {
+            'by_category': defaultdict(lambda: {'wins': 0, 'losses': 0, 'total_edge': 0, 'count': 0}),
+            'by_edge_range': defaultdict(lambda: {'wins': 0, 'losses': 0, 'count': 0}),
+            'by_spread': defaultdict(lambda: {'wins': 0, 'losses': 0, 'count': 0}),
+            'by_confidence': defaultdict(lambda: {'wins': 0, 'losses': 0, 'count': 0}),
+            'total_wins': 0,
+            'total_losses': 0,
+            'total_trades': 0,
+            'avg_win_edge': 0,
+            'avg_loss_edge': 0
+        }
+        self.params = {
+            'min_edge': 0.02,
+            'max_spread': 10,
+            'min_confidence': 0.5,
+            'kelly_multiplier': 1.0,
+            'position_size': 50
+        }
+        self.load_performance()
+    
+    def load_performance(self):
+        try:
+            with open('/tmp/performance.json', 'r') as f:
+                data = json.load(f)
+                self.performance_data.update(data.get('performance', {}))
+                self.params.update(data.get('params', {}))
+        except:
+            pass
+    
+    def save_performance(self):
+        try:
+            with open('/tmp/performance.json', 'w') as f:
+                json.dump({
+                    'performance': dict(self.performance_data),
+                    'params': self.params
+                }, f, indent=2)
+        except:
+            pass
+    
+    def learn(self, resolved_trades):
+        """Learn from resolved trades"""
+        if not resolved_trades:
+            return
+        
+        for trade in resolved_trades:
+            result = trade.get('result')
+            if not result:
+                continue
+            
+            category = trade.get('category', 'Other')
+            edge = trade.get('edge', 0)
+            spread = trade.get('spread', 0)
+            confidence = trade.get('confidence', 0.5)
+            
+            # Track by category
+            cat_stats = self.performance_data['by_category'][category]
+            if result == 'WON':
+                cat_stats['wins'] += 1
+                self.performance_data['total_wins'] += 1
+            else:
+                cat_stats['losses'] += 1
+                self.performance_data['total_losses'] += 1
+            cat_stats['total_edge'] += edge
+            cat_stats['count'] += 1
+            
+            # Track by edge range
+            edge_key = f"{int(edge*100)//5 * 5}-{(int(edge*100)//5 + 1) * 5}%"
+            edge_stats = self.performance_data['by_edge_range'][edge_key]
+            if result == 'WON':
+                edge_stats['wins'] += 1
+            else:
+                edge_stats['losses'] += 1
+            edge_stats['count'] += 1
+            
+            # Track by spread
+            spread_key = f"{int(spread)//5 * 5}-{(int(spread)//5 + 1) * 5}%"
+            spread_stats = self.performance_data['by_spread'][spread_key]
+            if result == 'WON':
+                spread_stats['wins'] += 1
+            else:
+                spread_stats['losses'] += 1
+            spread_stats['count'] += 1
+            
+            self.performance_data['total_trades'] += 1
+        
+        self.optimize_params()
+        self.save_performance()
+    
+    def optimize_params(self):
+        """Adjust parameters based on what works"""
+        total = self.performance_data['total_trades']
+        if total < 5:
+            return
+        
+        # Find best category
+        best_cat = None
+        best_cat_rate = 0
+        for cat, stats in self.performance_data['by_category'].items():
+            if stats['count'] >= 3:
+                rate = stats['wins'] / stats['count'] if stats['count'] > 0 else 0
+                if rate > best_cat_rate:
+                    best_cat_rate = rate
+                    best_cat = cat
+        
+        # Find best edge range
+        best_edge = 0.02
+        best_edge_rate = 0
+        for edge_range, stats in self.performance_data['by_edge_range'].items():
+            if stats['count'] >= 3:
+                rate = stats['wins'] / stats['count'] if stats['count'] > 0 else 0
+                if rate > best_edge_rate:
+                    best_edge_rate = rate
+                    # Extract lower bound
+                    try:
+                        best_edge = int(edge_range.split('-')[0].replace('%', '')) / 100
+                    except:
+                        best_edge = 0.02
+        
+        # Find best spread
+        best_spread = 10
+        best_spread_rate = 0
+        for spread_range, stats in self.performance_data['by_spread'].items():
+            if stats['count'] >= 3:
+                rate = stats['wins'] / stats['count'] if stats['count'] > 0 else 0
+                if rate > best_spread_rate:
+                    best_spread_rate = rate
+                    try:
+                        best_spread = int(spread_range.split('-')[0])
+                    except:
+                        best_spread = 10
+        
+        # Update params
+        if best_edge_rate > 0.3:
+            self.params['min_edge'] = max(0.01, best_edge - 0.01)
+        
+        if best_spread_rate > 0.3:
+            self.params['max_spread'] = min(best_spread + 5, 20)
+        
+        # Adjust position size based on win rate
+        win_rate = self.performance_data['total_wins'] / total if total > 0 else 0
+        if win_rate > 0.6:
+            self.params['kelly_multiplier'] = min(1.5, self.params['kelly_multiplier'] * 1.1)
+        elif win_rate < 0.4:
+            self.params['kelly_multiplier'] = max(0.5, self.params['kelly_multiplier'] * 0.9)
+    
+    def get_recommendations(self):
+        """Get AI recommendations based on learning"""
+        recs = []
+        
+        # Best performing category
+        best_cat = None
+        best_cat_rate = 0
+        for cat, stats in self.performance_data['by_category'].items():
+            if stats['count'] >= 3:
+                rate = stats['wins'] / stats['count'] if stats['count'] > 0 else 0
+                if rate > best_cat_rate:
+                    best_cat_rate = rate
+                    best_cat = cat
+        
+        if best_cat and best_cat_rate > 0.5:
+            recs.append(f"Focus on {best_cat} markets ({best_cat_rate*100:.0f}% win rate)")
+        
+        # Best edge range
+        best_edge = None
+        best_edge_rate = 0
+        for edge_range, stats in self.performance_data['by_edge_range'].items():
+            if stats['count'] >= 3:
+                rate = stats['wins'] / stats['count'] if stats['count'] > 0 else 0
+                if rate > best_edge_rate:
+                    best_edge_rate = rate
+                    best_edge = edge_range
+        
+        if best_edge and best_edge_rate > 0.5:
+            recs.append(f"Optimal edge: {best_edge} ({best_edge_rate*100:.0f}% win rate)")
+        
+        # Overall performance
+        total = self.performance_data['total_trades']
+        if total > 0:
+            win_rate = self.performance_data['total_wins'] / total
+            recs.append(f"Overall: {self.performance_data['total_wins']}W/{total} ({win_rate*100:.0f}%)")
+        
+        return recs
+
 def generate_sparkline_data(current_price):
     data = []
     price = current_price
@@ -238,6 +425,7 @@ class QuantEngine:
         self.prob = ProbabilityEstimator()
         self.kelly = KellyCriterion()
         self.ai = AIAnalyzer()
+        self.learner = SelfLearningEngine()
     
     def scan_and_trade(self):
         global trading_state
@@ -261,6 +449,11 @@ class QuantEngine:
                 losses = sum(1 for t in resolved_trades if t.get('result') == 'LOST')
                 trading_state['wins'] = wins
                 trading_state['losses'] = losses
+                
+                # Self-learning: learn from resolved trades
+                self.learner.learn(resolved_trades)
+                trading_state['ai_recommendations'] = self.learner.get_recommendations()
+                trading_state['learned_params'] = self.learner.params.copy()
             
             # Process markets
             market_data = []
@@ -411,10 +604,17 @@ class QuantEngine:
                     prob_result = self.prob.estimate({'question': m['question'], 'price_yes': price})
                     edge = prob_result['probability'] - price
                     
-                    # Only trade if edge > 2%
-                    if abs(edge) > 0.03:
+                    # Only trade if edge exceeds learned minimum
+                    min_edge = self.learner.params.get('min_edge', 0.02)
+                    max_spread = self.learner.params.get('max_spread', 10)
+                    
+                    if abs(edge) > min_edge and m['spread'] < max_spread:
                         odds = 1 / price if price > 0 else 1
                         kelly_result = self.kelly.calculate(prob_result['probability'], odds)
+                        
+                        # Apply learned Kelly multiplier
+                        kelly_mult = self.learner.params.get('kelly_multiplier', 1.0)
+                        kelly_result['kelly_fraction'] *= kelly_mult
                         
                         # Higher Kelly for short-term trades
                         if days_until is not None and days_until <= 3:
@@ -1143,6 +1343,8 @@ def api_status():
         'total_exposure': trading_state.get('total_exposure', 0),
         'edge_history': trading_state.get('edge_history', []),
         'ai_insights': trading_state.get('ai_insights', []),
+        'ai_recommendations': trading_state.get('ai_recommendations', []),
+        'learned_params': trading_state.get('learned_params', {}),
         'sectors': trading_state.get('sectors', {})
     })
 
