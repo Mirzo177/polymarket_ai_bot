@@ -183,17 +183,79 @@ def run_trading():
 # Start trading in background
 threading.Thread(target=run_trading, daemon=True).start()
 
+DASHBOARD_HTML = '''<!DOCTYPE html>
+<html>
+<head>
+    <title>Polymarket Quant Bot</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: linear-gradient(135deg, #0f0c29, #1a1a3e); color: #fff; font-family: system-ui, sans-serif; min-height: 100vh; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; padding: 20px; background: rgba(0,0,0,0.4); border-radius: 15px; }
+        .header h1 { background: linear-gradient(90deg, #00d4ff, #00ff88); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 25px; }
+        .stat-card { background: rgba(0,0,0,0.4); padding: 20px; border-radius: 12px; border: 1px solid rgba(0,212,255,0.2); }
+        .stat-label { color: #888; font-size: 12px; text-transform: uppercase; }
+        .stat-value { font-size: 28px; font-weight: bold; color: #00d4ff; margin-top: 5px; }
+        .trades-section { background: rgba(0,0,0,0.4); padding: 20px; border-radius: 15px; }
+        .trades-section h2 { margin-bottom: 15px; color: #00ff88; }
+        .trade { background: rgba(255,255,255,0.05); padding: 15px; margin-bottom: 10px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .trade-action { font-weight: bold; color: #00ff88; }
+        .trade-action.sell { color: #ff4757; }
+        .refresh { position: fixed; bottom: 20px; right: 20px; background: #00d4ff; color: #000; padding: 12px 24px; border-radius: 25px; text-decoration: none; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Polymarket Quant Bot</h1>
+            <span class="mode-badge" id="mode">Loading...</span>
+        </div>
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-label">Cycle</div><div class="stat-value" id="cycle">-</div></div>
+            <div class="stat-card"><div class="stat-label">Portfolio</div><div class="stat-value" id="portfolio">$0</div></div>
+            <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-value" id="trades">0</div></div>
+            <div class="stat-card"><div class="stat-label">Wins</div><div class="stat-value" id="wins">0</div></div>
+            <div class="stat-card"><div class="stat-label">Losses</div><div class="stat-value" id="losses">0</div></div>
+            <div class="stat-card"><div class="stat-label">Status</div><div class="stat-value" id="status" style="font-size:18px">-</div></div>
+        </div>
+        <div class="trades-section">
+            <h2>Recent Trades</h2>
+            <div id="trades-list">Loading...</div>
+        </div>
+    </div>
+    <a href="#" class="refresh" onclick="location.reload()">🔄 Refresh</a>
+    <script>
+        async function update() {
+            try {
+                const s = await fetch('/api/status').then(r=>r.json());
+                document.getElementById('cycle').textContent = s.cycle;
+                document.getElementById('portfolio').textContent = '$' + s.portfolio;
+                document.getElementById('trades').textContent = s.trades_executed;
+                document.getElementById('wins').textContent = s.wins;
+                document.getElementById('losses').textContent = s.losses;
+                document.getElementById('status').textContent = s.status;
+                document.getElementById('mode').textContent = s.mode;
+                
+                const t = await fetch('/api/trades').then(r=>r.json());
+                const list = document.getElementById('trades-list');
+                if (t.trades.length === 0) {
+                    list.innerHTML = '<p style="color:#888">No trades yet</p>';
+                } else {
+                    list.innerHTML = t.trades.map(x => '<div class="trade"><div><span class="trade-action '+(x.action.includes('SELL')?'sell':'')+'">'+x.action+'</span> '+x.question.substring(0,40)+'...</div><div>$'+x.size.toFixed(2)+' @ '+x.price.toFixed(2)+'</div></div>').join('');
+                }
+            } catch(e) { console.error(e); }
+        }
+        update(); setInterval(update, 10000);
+    </script>
+</body>
+</html>'''
+
 @app.route('/dashboard')
 def dashboard():
-    import os
-    for path in ['dashboard.html', '/app/dashboard.html', '/tmp/dashboard.html']:
-        try:
-            if os.path.exists(path):
-                with open(path, 'r') as f:
-                    return f.read()
-        except:
-            pass
-    return '<h1>Dashboard not found</h1>'
+    return DASHBOARD_HTML
 
 @app.route('/')
 def index():
