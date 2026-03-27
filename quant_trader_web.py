@@ -586,8 +586,15 @@ class QuantEngine:
             # Sort by research score and take top candidates
             research_candidates.sort(key=lambda x: x['research_score'], reverse=True)
             
-            # Simple: take top 5 candidates with shortest days
+            # Debug: Print ALL days_until values
+            print("=== RESEARCH CANDIDATES DAYS ===")
+            for r in research_candidates[:10]:
+                print(f"  {r.get('days_until')} days: {r['market'].get('question', '')[:30]}")
+            print("=== END ===")
+            
+            # Simple: take top 5 by research score
             soon_resolving = research_candidates[:5]
+            print(f"Taking {len(soon_resolving)} trades")
             
             # Trading logic
             new_trades = []
