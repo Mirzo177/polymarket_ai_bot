@@ -329,9 +329,9 @@ class QuantEngine:
                 trading_state['edge_history'].extend([t['edge'] for t in new_trades])
                 if len(trading_state['edge_history']) > 100:
                     trading_state['edge_history'] = trading_state['edge_history'][-100:]
-                
-                total_cost = sum(t['cost'] for t in trading_state.get('trades', []))
-                trading_state['total_exposure'] = total_cost
+            
+            total_cost = sum(t['cost'] for t in trading_state.get('trades', []))
+            trading_state['total_exposure'] = total_cost
             
             trading_state['status'] = 'RUNNING'
             save_json('quant_state.json', trading_state)
