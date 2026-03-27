@@ -76,8 +76,9 @@ class KellyCriterion:
             return {'kelly_fraction': 0, 'edge': 0}
         b = odds - 1
         expected_value = (probability * b) - (1 - probability)
-        kelly = max(0, (b * probability - (1 - probability)) / b) if b > 0 else 0
-        return {'kelly_fraction': min(kelly * 0.25, 0.25), 'edge': expected_value}
+        # Simplified: use fixed 5% of portfolio per trade with edge
+        kelly = 0.05 if expected_value > 0 else 0
+        return {'kelly_fraction': kelly, 'edge': expected_value}
 
 class QuantEngine:
     def __init__(self):
