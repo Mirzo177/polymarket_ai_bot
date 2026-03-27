@@ -582,10 +582,22 @@ class QuantEngine:
             
             # Filter: ONLY trade short-term markets (max 30 days)
             soon_resolving = []
+            
+            # Debug: show all days
+            day_counts = {}
+            for r in research_candidates:
+                d = r.get('days_until')
+                if d is None:
+                    d = 'None'
+                day_counts[d] = day_counts.get(d, 0) + 1
+            print(f"DEBUG days distribution: {day_counts}")
+            
             for max_d in [3, 7, 14, 30]:
                 candidates = [r for r in research_candidates if r.get('days_until') is not None and r.get('days_until', 999) <= max_d]
+                print(f"DEBUG max_d={max_d}, candidates={len(candidates)}")
                 if candidates:
                     soon_resolving = candidates[:5]
+                    print(f"DEBUG: Found {len(soon_resolving)} short-term trades!")
                     break
             
             # If still no short-term markets, skip trading entirely
