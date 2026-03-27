@@ -321,16 +321,36 @@ class QuantEngine:
                 except:
                     continue
             
+            # Load persisted trades
+            try:
+                with open('/tmp/trades_history.json', 'r') as f:
+                    trades_history = json.load(f)
+            except:
+                trades_history = []
+            
+            # Add new trades to history
             if new_trades:
-                existing_trades = trading_state.get('trades', [])
-                trading_state['trades'] = new_trades + existing_trades
-                trading_state['trades_executed'] += len(new_trades)
+                trades_history.extend(new_trades)
+                # Keep last 100 trades
+                trades_history = trades_history[-100:]
+                # Save to file
+                try:
+                    with open('/tmp/trades_history.json', 'w') as f:
+                        json.dump(trades_history, f, indent=2)
+                except:
+                    pass
+                
+                trading_state['trades'] = new_trades
+                trading_state['trades_executed'] = len(trades_history)
                 trading_state['last_trade_time'] = datetime.now(timezone.utc).isoformat()
                 trading_state['edge_history'].extend([t['edge'] for t in new_trades])
                 if len(trading_state['edge_history']) > 100:
                     trading_state['edge_history'] = trading_state['edge_history'][-100:]
+            else:
+                trading_state['trades'] = trades_history[-20:] if trades_history else []
+                trading_state['trades_executed'] = len(trades_history)
             
-            total_cost = sum(t['cost'] for t in trading_state.get('trades', []))
+            total_cost = sum(t['cost'] for t in trades_history)
             trading_state['total_exposure'] = total_cost
             
             trading_state['status'] = 'RUNNING'
