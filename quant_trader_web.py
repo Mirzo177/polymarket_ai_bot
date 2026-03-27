@@ -183,15 +183,17 @@ def run_trading():
 # Start trading in background
 threading.Thread(target=run_trading, daemon=True).start()
 
+@app.route('/dashboard')
+def dashboard():
+    try:
+        with open('dashboard.html', 'r') as f:
+            return f.read()
+    except:
+        return '<h1>Dashboard not found</h1>'
+
 @app.route('/')
 def index():
-    return jsonify({
-        'name': 'Polymarket Quant Trader',
-        'status': trading_state['status'],
-        'cycle': trading_state['cycle'],
-        'trades': len(trading_state['trades']),
-        'error': trading_state.get('last_error', '')
-    })
+    return '<h1>Polymarket Quant Trader</h1><p><a href="/dashboard">View Dashboard</a></p>'
 
 @app.route('/api/status')
 def api_status():
