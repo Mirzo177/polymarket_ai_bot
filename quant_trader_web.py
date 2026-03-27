@@ -390,9 +390,9 @@ class QuantEngine:
             # Filter: only markets resolving within MAX_RESOLUTION_DAYS OR no end date (will resolve eventually)
             soon_resolving = [r for r in research_candidates if r['days_until'] is not None and r['days_until'] <= MAX_RESOLUTION_DAYS]
             
-            # If no soon-resolving markets, take top 3 by research score anyway
+            # If no soon-resolving markets, take top 5 by research score anyway
             if not soon_resolving:
-                soon_resolving = research_candidates[:3]
+                soon_resolving = research_candidates[:5]
             
             # Trading logic
             trading_state['cycle'] += 1
@@ -411,7 +411,7 @@ class QuantEngine:
                     prob_result = self.prob.estimate({'question': m['question'], 'price_yes': price})
                     edge = prob_result['probability'] - price
                     
-                    # Only trade if edge > 3%
+                    # Only trade if edge > 2%
                     if abs(edge) > 0.03:
                         odds = 1 / price if price > 0 else 1
                         kelly_result = self.kelly.calculate(prob_result['probability'], odds)
