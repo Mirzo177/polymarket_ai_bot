@@ -425,7 +425,11 @@ class QuantEngine:
         self.prob = ProbabilityEstimator()
         self.kelly = KellyCriterion()
         self.ai = AIAnalyzer()
-        self.learner = SelfLearningEngine()
+        try:
+            self.learner = SelfLearningEngine()
+        except Exception as e:
+            print(f"Error loading learner: {e}")
+            self.learner = None
     
     def scan_and_trade(self):
         global trading_state
@@ -452,9 +456,10 @@ class QuantEngine:
                 trading_state['losses'] = losses
                 
                 # Self-learning: learn from resolved trades
-                self.learner.learn(resolved_trades)
-                trading_state['ai_recommendations'] = self.learner.get_recommendations()
-                trading_state['learned_params'] = self.learner.params.copy()
+                if self.learner:
+                    self.learner.learn(resolved_trades)
+                    trading_state['ai_recommendations'] = self.learner.get_recommendations()
+                    trading_state['learned_params'] = self.learner.params.copy()
             
             # Process markets
             market_data = []
@@ -601,15 +606,20 @@ class QuantEngine:
                     edge = prob_result['probability'] - price
                     
                     # Only trade if edge exceeds learned minimum
-                    min_edge = self.learner.params.get('min_edge', 0.02)
-                    max_spread = self.learner.params.get('max_spread', 10)
+                    if self.learner:
+                        min_edge = self.learner.params.get('min_edge', 0.02)
+                        max_spread = self.learner.params.get('max_spread', 10)
+                        kelly_mult = self.learner.params.get('kelly_multiplier', 1.0)
+                    else:
+                        min_edge = 0.02
+                        max_spread = 10
+                        kelly_mult = 1.0
                     
                     if abs(edge) > min_edge and m['spread'] < max_spread:
                         odds = 1 / price if price > 0 else 1
                         kelly_result = self.kelly.calculate(prob_result['probability'], odds)
                         
-                        # Apply learned Kelly multiplier
-                        kelly_mult = self.learner.params.get('kelly_multiplier', 1.0)
+                        # Apply Kelly multiplier
                         kelly_result['kelly_fraction'] *= kelly_mult
                         
                         # Higher Kelly for short-term trades
