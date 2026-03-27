@@ -96,8 +96,8 @@ class QuantEngine:
             liquid = []
             for m in markets:
                 try:
-                    vol = m.get('volume') or m.get('volume24hr') or m.get('volume24Hr') or 0
-                    liq = m.get('liquidity') or 0
+                    vol = float(m.get('volume') or m.get('volume24hr') or m.get('volume24Hr') or 0)
+                    liq = float(m.get('liquidity') or 0)
                     prices_str = m.get('outcomePrices')
                     
                     # Parse JSON string if needed
@@ -113,7 +113,7 @@ class QuantEngine:
                     continue
             
             # Sort by volume
-            liquid.sort(key=lambda x: x.get('volume') or 0, reverse=True)
+            liquid.sort(key=lambda x: float(x.get('volume') or 0), reverse=True)
             
             trading_state['cycle'] += 1
             new_trades = []
@@ -137,7 +137,7 @@ class QuantEngine:
                     })
                     edge = prob_result['probability'] - price
                     
-                    if abs(edge) > 0.02:  # Lower threshold
+                    if abs(edge) > 0.01:  # Very low threshold to find more trades
                         odds = 1 / price if price > 0 else 1
                         kelly_result = self.kelly.calculate(prob_result['probability'], odds)
                         size = min(1000 * kelly_result['kelly_fraction'], 100)  # Max $100
@@ -153,7 +153,7 @@ class QuantEngine:
                                 'cost': round(size * price, 2),
                                 'question': m.get('question', '')[:60],
                                 'edge': round(edge, 4),
-                                'volume': m.get('volume24hr') or 0,
+                                'volume': float(m.get('volume') or 0),
                                 'strategy': 'FUNDAMENTAL',
                                 'result': 'PENDING'
                             }
