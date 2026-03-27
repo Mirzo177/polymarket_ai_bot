@@ -33,6 +33,7 @@ trading_state = {
     'api_errors': 0,
     'last_trade_time': None,
     'total_volume_scanned': 0,
+    'total_exposure': 0,
     'strategy_stats': defaultdict(int),
     'edge_history': [],
     'pending_positions': [],
@@ -321,12 +322,16 @@ class QuantEngine:
                     continue
             
             if new_trades:
-                trading_state['trades'] = new_trades
+                existing_trades = trading_state.get('trades', [])
+                trading_state['trades'] = new_trades + existing_trades
                 trading_state['trades_executed'] += len(new_trades)
                 trading_state['last_trade_time'] = datetime.now(timezone.utc).isoformat()
                 trading_state['edge_history'].extend([t['edge'] for t in new_trades])
                 if len(trading_state['edge_history']) > 100:
                     trading_state['edge_history'] = trading_state['edge_history'][-100:]
+                
+                total_cost = sum(t['cost'] for t in trading_state.get('trades', []))
+                trading_state['total_exposure'] = total_cost
             
             trading_state['status'] = 'RUNNING'
             save_json('quant_state.json', trading_state)
@@ -1187,6 +1192,7 @@ def api_status():
         'api_errors': trading_state.get('api_errors', 0),
         'last_trade_time': trading_state.get('last_trade_time'),
         'total_volume_scanned': trading_state.get('total_volume_scanned', 0),
+        'total_exposure': trading_state.get('total_exposure', 0),
         'strategy_stats': dict(trading_state.get('strategy_stats', {})),
         'edge_history': trading_state.get('edge_history', []),
         'ai_insights': trading_state.get('ai_insights', []),
