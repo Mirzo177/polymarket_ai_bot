@@ -577,23 +577,15 @@ class QuantEngine:
                 except:
                     continue
             
-            # Debug: print research candidates with days
-            for r in research_candidates[:10]:
-                print(f"DEBUG: {r['market'].get('question', '')[:30]}... days={r['days_until']}, score={r['research_score']:.1f}")
-            
             # Sort by research score
             research_candidates.sort(key=lambda x: x['research_score'], reverse=True)
             
             # Filter: ONLY trade short-term markets (max 30 days)
-            # Priority: 3 days > 7 days > 14 days > 30 days
-            
             soon_resolving = []
             for max_d in [3, 7, 14, 30]:
-                candidates = [r for r in research_candidates if r['days_until'] is not None and r['days_until'] <= max_d]
-                print(f"DEBUG: max_d={max_d}, candidates={len(candidates)}")
+                candidates = [r for r in research_candidates if r.get('days_until') is not None and r.get('days_until', 999) <= max_d]
                 if candidates:
                     soon_resolving = candidates[:5]
-                    print(f"DEBUG: Taking {len(soon_resolving)} trades from {max_d}-day markets")
                     break
             
             # If still no short-term markets, skip trading entirely
