@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quant Trading Engine - Web Version for Render (No polymarket-apis)
+Quant Trading Engine - Web Version for Render (Fixed)
 """
 import os
 import json
@@ -15,8 +15,6 @@ import httpx
 app = Flask(__name__)
 CORS(app)
 
-DATA_DIR = os.environ.get('DATA_DIR', '/tmp')
-
 trading_state = {
     'cycle': 0,
     'trades': [],
@@ -24,11 +22,12 @@ trading_state = {
     'trades_executed': 0,
     'wins': 0,
     'losses': 0,
-    'status': 'STARTING'}
+    'status': 'STARTING',
+    'last_error': ''}
 
 def save_json(filename, data):
     try:
-        with open(f'{DATA_DIR}/{filename}', 'w') as f:
+        with open(f'/tmp/{filename}', 'w') as f:
             json.dump(data, f, indent=2)
     except:
         pass
@@ -39,29 +38,43 @@ class PolymarketAPI:
         
     def get_markets(self, limit=50):
         try:
-            resp = httpx.get(f"{self.gamma_url}/markets", params={'limit': limit, 'closed': 'false'}, timeout=30)
+            resp = httpx.get(f"{self.gamma_url}/markets", 
+                            params={'limit': limit, 'closed': 'false'}, 
+                            timeout=30)
             if resp.status_code == 200:
-                return resp.json()
+                data = resp.json()
+                # Handle both list and dict response
+                if isinstance(data, list):
+                    return data
+                elif isinstance(data, dict):
+                    return data.get('markets', [])
+                return []
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"API Error: {e}")
+            trading_state['last_error'] = str(e)[:50]
         return []
 
 class ProbabilityEstimator:
     def estimate(self, market_data):
         price = market_data.get('price_yes', 0.5)
         q = market_data.get('question', '').lower()
+        
         if 'jesus christ' in q:
             fundamental = 0.02
         elif 'nhl' in q or 'stanley cup' in q:
             fundamental = min(0.15, price * 3) if price < 0.05 else price
+        elif 'gta' in q:
+            fundamental = 0.05
         else:
             fundamental = price
+            
         prob = 0.3 * fundamental + 0.7 * price
         return {'probability': prob, 'confidence': 0.5}
 
 class KellyCriterion:
     def calculate(self, probability, odds):
-        if odds <= 1: return {'kelly_fraction': 0, 'edge': 0}
+        if odds <= 1:
+            return {'kelly_fraction': 0, 'edge': 0}
         b = odds - 1
         expected_value = (probability * b) - (1 - probability)
         kelly = max(0, (b * probability - (1 - probability)) / b) if b > 0 else 0
@@ -78,50 +91,86 @@ class QuantEngine:
         try:
             trading_state['status'] = 'SCANNING'
             markets = self.api.get_markets(50)
-            if isinstance(markets, dict):
-                markets = markets.get('markets', [])
             
-            liquid = [m for m in markets if (m.get('volume24hr', 0) or 0) > 10000 and m.get('liquidity', 0) and m.get('outcomePrices')]
-            liquid.sort(key=lambda x: x.get('volume24hr', 0), reverse=True)
+            # Filter for liquid markets
+            liquid = []
+            for m in markets:
+                try:
+                    vol = m.get('volume') or m.get('volume24hr') or m.get('volume24Hr') or 0
+                    liq = m.get('liquidity') or 0
+                    prices_str = m.get('outcomePrices')
+                    
+                    # Parse JSON string if needed
+                    if prices_str and isinstance(prices_str, str):
+                        import json
+                        prices = json.loads(prices_str)
+                    else:
+                        prices = prices_str or []
+                    
+                    if vol > 5000 and liq > 2000 and prices:
+                        liquid.append(m)
+                except:
+                    continue
+            
+            # Sort by volume
+            liquid.sort(key=lambda x: x.get('volume') or 0, reverse=True)
             
             trading_state['cycle'] += 1
             new_trades = []
             
-            for m in liquid[:10]:
+            for m in liquid[:15]:
                 try:
-                    prices = m.get('outcomePrices', [])
+                    prices_str = m.get('outcomePrices')
+                    if prices_str and isinstance(prices_str, str):
+                        import json
+                        prices = json.loads(prices_str)
+                    else:
+                        prices = prices_str or []
                     price = float(prices[0]) if prices else 0.5
-                    prob_result = self.prob.estimate({'question': m.get('question', ''), 'price_yes': price})
+                    
+                    if price < 0.01 or price > 0.99:
+                        continue
+                    
+                    prob_result = self.prob.estimate({
+                        'question': m.get('question', ''), 
+                        'price_yes': price
+                    })
                     edge = prob_result['probability'] - price
                     
-                    if abs(edge) > 0.05:
+                    if abs(edge) > 0.02:  # Lower threshold
                         odds = 1 / price if price > 0 else 1
                         kelly_result = self.kelly.calculate(prob_result['probability'], odds)
-                        size = min(1000 * kelly_result['kelly_fraction'], 50)
+                        size = min(1000 * kelly_result['kelly_fraction'], 100)  # Max $100
                         
-                        if size > 5:
+                        if size > 2:  # Lower minimum
+                            action = 'BUY YES' if edge > 0 else 'SELL YES'
                             trade = {
                                 'id': str(uuid.uuid4())[:12],
                                 'timestamp': datetime.now(timezone.utc).isoformat(),
-                                'action': 'BUY YES' if edge > 0 else 'SELL YES',
+                                'action': action,
                                 'size': round(size, 2),
                                 'price': round(price, 4),
                                 'cost': round(size * price, 2),
-                                'question': m.get('question', ''),
+                                'question': m.get('question', '')[:60],
                                 'edge': round(edge, 4),
+                                'volume': m.get('volume24hr') or 0,
                                 'strategy': 'FUNDAMENTAL',
                                 'result': 'PENDING'
                             }
                             new_trades.append(trade)
-                except:
+                except Exception as e:
                     continue
             
             trading_state['trades'] = new_trades
             trading_state['trades_executed'] += len(new_trades)
             trading_state['status'] = 'RUNNING'
             save_json('quant_state.json', trading_state)
+            
+            print(f"Cycle {trading_state['cycle']}: Found {len(new_trades)} trades")
+            
         except Exception as e:
             trading_state['status'] = f'ERROR: {str(e)[:30]}'
+            print(f"Error: {e}")
 
 def run_trading():
     engine = QuantEngine()
@@ -129,23 +178,36 @@ def run_trading():
         engine.scan_and_trade()
         time.sleep(60)
 
+# Start trading in background
 threading.Thread(target=run_trading, daemon=True).start()
 
 @app.route('/')
 def index():
-    return jsonify({'name': 'Polymarket Quant Trader', 'status': trading_state['status'], 'cycle': trading_state['cycle']})
+    return jsonify({
+        'name': 'Polymarket Quant Trader',
+        'status': trading_state['status'],
+        'cycle': trading_state['cycle'],
+        'trades': len(trading_state['trades']),
+        'error': trading_state.get('last_error', '')
+    })
 
 @app.route('/api/status')
 def api_status():
     return jsonify({
-        'mode': 'QUANT ENGINE', 'cycle': trading_state['cycle'], 'portfolio': trading_state['portfolio'],
-        'trades_executed': trading_state['trades_executed'], 'wins': trading_state['wins'], 'losses': trading_state['losses'],
-        'status': trading_state['status'], 'last_update': datetime.now(timezone.utc).isoformat()
+        'mode': 'QUANT ENGINE',
+        'cycle': trading_state['cycle'],
+        'portfolio': trading_state['portfolio'],
+        'trades_executed': trading_state['trades_executed'],
+        'wins': trading_state['wins'],
+        'losses': trading_state['losses'],
+        'status': trading_state['status'],
+        'last_error': trading_state.get('last_error', ''),
+        'last_update': datetime.now(timezone.utc).isoformat()
     })
 
 @app.route('/api/trades')
 def api_trades():
-    return jsonify({'trades': trading_state['trades'][:15]})
+    return jsonify({'trades': trading_state['trades'][:20]})
 
 @app.route('/api/markets')
 def api_markets():
@@ -153,11 +215,17 @@ def api_markets():
 
 @app.route('/api/insights')
 def api_insights():
-    return jsonify({'insights': [f"Quant running - Cycle {trading_state['cycle']}", f"{len(trading_state['trades'])} positions"]})
+    return jsonify({'insights': [
+        f"Quant running - Cycle {trading_state['cycle']}",
+        f"{len(trading_state['trades'])} positions",
+        trading_state.get('last_error', '')
+    ]})
 
 @app.route('/api/logs')
 def api_logs():
-    return jsonify({'logs': [{'time': datetime.now(timezone.utc).isoformat(), 'type': 'STATUS', 'message': f"Cycle {trading_state['cycle']}"}]})
+    return jsonify({'logs': [
+        {'time': datetime.now(timezone.utc).isoformat(), 'type': 'STATUS', 'message': f"Cycle {trading_state['cycle']}"}
+    ]})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
