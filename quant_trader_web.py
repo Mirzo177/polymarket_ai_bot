@@ -580,12 +580,24 @@ class QuantEngine:
             # Sort by research score
             research_candidates.sort(key=lambda x: x['research_score'], reverse=True)
             
-            # Filter: only markets resolving within MAX_RESOLUTION_DAYS OR no end date (will resolve eventually)
-            soon_resolving = [r for r in research_candidates if r['days_until'] is not None and r['days_until'] <= MAX_RESOLUTION_DAYS]
+            # Filter: ONLY trade short-term markets (max 30 days)
+            # Priority: 3 days > 7 days > 14 days > 30 days
+            max_days = 30
             
-            # If no soon-resolving markets, take top 5 by research score anyway
+            soon_resolving = []
+            for max_d in [3, 7, 14, 30]:
+                candidates = [r for r in research_candidates if r['days_until'] is not None and r['days_until'] <= max_d]
+                if candidates:
+                    soon_resolving = candidates[:5]
+                    break
+            
+            # If still no short-term markets, skip trading entirely
             if not soon_resolving:
-                soon_resolving = research_candidates[:5]
+                print(f"Cycle {trading_state.get('cycle', 0)}: No markets resolving within {max_days} days - skipping trades")
+                trading_state['trades'] = []
+                save_json('trades_history.json', {'open': [], 'resolved': trading_state.get('resolved_trades', [])})
+                trading_state['status'] = 'NO SHORT-TERM MARKETS'
+                return
             
             # Trading logic
             trading_state['cycle'] += 1
