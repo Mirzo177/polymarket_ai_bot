@@ -185,11 +185,15 @@ threading.Thread(target=run_trading, daemon=True).start()
 
 @app.route('/dashboard')
 def dashboard():
-    try:
-        with open('dashboard.html', 'r') as f:
-            return f.read()
-    except:
-        return '<h1>Dashboard not found</h1>'
+    import os
+    for path in ['dashboard.html', '/app/dashboard.html', '/tmp/dashboard.html']:
+        try:
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    return f.read()
+        except:
+            pass
+    return '<h1>Dashboard not found</h1>'
 
 @app.route('/')
 def index():
